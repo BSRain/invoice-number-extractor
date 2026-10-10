@@ -1,0 +1,427 @@
+"""Native Windows batch UI; only the main thread touches Tk widgets."""
+from pathlib import Path
+from queue import Empty, Queue
+from threading import Event, Thread
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+from .core import confirm_record, export_excel, mark_duplicates
+from .reader import InvoiceReader, SUPPORTED, collect_inputs, parse_text, preview_image
+
+BG, INK, MUTED, ACCENT = '#F3F5F7', '#18334D', '#546579', '#176B57'
+
+
+class InvoiceApp:
+    def __init__(self, root):
+        self.root = root
+        self.rows = []
+        self.paths_seen = set()
+        self.queue = Queue()
+        self.stop = Event()
+        self.reader = InvoiceReader(self.stop)
+        self.busy = False
+        self.dirty = False
+        self.selected = None
+        self.preview = None
+        self._photo = self._crop_photo = None
+        self._render_timer = None
+        self.number = tk.StringVar()
+        self.code = tk.StringVar()
+        self.single_invoice = tk.BooleanVar(value=False)
+        self.caption = tk.StringVar(value='选择一条结果，查看原件并核对号码。')
+        self.reason = tk.StringVar()
+        self.summary = tk.StringVar(value='暂无结果')
+        self.progress_text = tk.StringVar(value='拖入文件或文件夹，也可以点击“添加文件”。')
+        root.title('发票号码提取 · 本地版')
+        width = min(1360,max(980,root.winfo_screenwidth()-80))
+        height = min(900,max(640,root.winfo_screenheight()-100))
+        root.geometry(f'{width}x{height}+40+40')
+        root.minsize(980,640)
+        root.configure(bg=BG)
+        self.build_ui()
+        root.protocol('WM_DELETE_WINDOW',self.close)
+        root.bind('<Control-o>',lambda _: self.choose_files())
+        root.bind('<Control-s>',lambda _: self.export())
+        root.bind('<Control-Return>',lambda _: self.confirm())
+        root.after(120,self.poll)
+
+    def build_ui(self):
+        style = ttk.Style(self.root)
+        style.theme_use('clam')
+        style.configure('.',font=('Microsoft YaHei UI',10),background=BG,foreground=INK)
+        style.configure('TButton',padding=(12,8))
+        style.configure('Primary.TButton',background=ACCENT,foreground='white')
+        style.map('Primary.TButton',background=[('active','#115440'),('disabled','#879E95')])
+        style.configure('Treeview',background='white',fieldbackground='white',rowheight=34)
+        style.configure('Treeview.Heading',background='#E5EBF0',padding=8,font=('Microsoft YaHei UI',10,'bold'))
+        style.map('Treeview',background=[('selected','#D5E7F2')],foreground=[('selected',INK)])
+        header = ttk.Frame(self.root,padding=(20,16,20,8))
+        header.pack(fill='x')
+        ttk.Label(header,text='发票号码提取',font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
+        ttk.Label(header,text='PDF / 图片 / 文字  ·  本机离线处理',foreground=MUTED).pack(side='right')
+        toolbar = ttk.Frame(self.root,padding=(20,8))
+        toolbar.pack(fill='x')
+        self.import_buttons = []
+        for text,command in [('添加文件',self.choose_files),('添加文件夹',self.choose_folder),('粘贴文字',self.paste)]:
+            button = ttk.Button(toolbar,text=text,command=command)
+            button.pack(side='left',padx=(0,8))
+            self.import_buttons.append(button)
+        self.export_button = ttk.Button(toolbar,text='导出全部 Excel',style='Primary.TButton',command=self.export)
+        self.export_button.pack(side='right')
+        self.clear_button = ttk.Button(toolbar,text='清空结果',command=self.clear)
+        self.clear_button.pack(side='right',padx=8)
+        self.stop_button = ttk.Button(toolbar,text='停止识别',command=self.cancel,state='disabled')
+        self.stop_button.pack(side='right')
+        options = ttk.Frame(self.root,padding=(20,0,20,4))
+        options.pack(fill='x')
+        self.fast_check = ttk.Checkbutton(options,text='快速模式（每页只有一张发票）',
+                                          variable=self.single_invoice)
+        self.fast_check.pack(side='left')
+        ttk.Label(options,text='同页多张票请保持未勾选；快速模式遇疑难结果会回退整页。',
+                  foreground=MUTED).pack(side='left',padx=16)
+        panes = ttk.Panedwindow(self.root,orient='horizontal')
+        panes.pack(fill='both',expand=True,padx=20,pady=8)
+        left = ttk.Frame(panes)
+        right = ttk.Frame(panes,padding=(12,0,0,0))
+        panes.add(left,weight=3)
+        panes.add(right,weight=2)
+        ttk.Label(left,text='识别结果',font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w',pady=(0,8))
+        table = ttk.Frame(left)
+        table.pack(fill='both',expand=True)
+        table.rowconfigure(0,weight=1)
+        table.columnconfigure(0,weight=1)
+        columns = [('file','来源文件',245),('page','页',45),('number','发票号码',205),
+                   ('state','状态',88),('duplicate','重复于',75)]
+        self.tree = ttk.Treeview(table,columns=[c[0] for c in columns],show='headings',selectmode='browse')
+        for name,title,width in columns:
+            self.tree.heading(name,text=title)
+            self.tree.column(name,width=width,minwidth=40,stretch=name == 'file')
+        self.tree.grid(row=0,column=0,sticky='nsew')
+        vertical = ttk.Scrollbar(table,orient='vertical',command=self.tree.yview)
+        vertical.grid(row=0,column=1,sticky='ns')
+        horizontal = ttk.Scrollbar(table,orient='horizontal',command=self.tree.xview)
+        horizontal.grid(row=1,column=0,sticky='ew')
+        self.tree.configure(yscrollcommand=vertical.set,xscrollcommand=horizontal.set)
+        self.tree.tag_configure('待复核',background='#FFF4DB')
+        self.tree.tag_configure('未识别',background='#FDEBEC')
+        self.tree.tag_configure('失败',background='#FDEBEC')
+        self.tree.tag_configure('已确认',background='#E8F4ED')
+        self.tree.bind('<<TreeviewSelect>>',self.select)
+        ttk.Label(left,textvariable=self.summary,foreground=MUTED).pack(anchor='w',pady=10)
+        ttk.Label(right,text='原件与号码区域',font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w',pady=(0,8))
+        self.canvas = tk.Canvas(right,background='white',highlightthickness=1,highlightbackground='#D6DEE5',height=275)
+        self.canvas.pack(fill='both',expand=True)
+        self.canvas.bind('<Configure>',self.schedule_render)
+        caption_label = ttk.Label(right,textvariable=self.caption,wraplength=460,foreground=MUTED)
+        caption_label.pack(fill='x',pady=8)
+        self.crop_canvas = tk.Canvas(right,background='white',height=66,highlightthickness=1,highlightbackground='#D6DEE5')
+        self.crop_canvas.pack(fill='x')
+        form = ttk.Frame(right,padding=(0,10))
+        form.pack(fill='x')
+        form.columnconfigure(1,weight=1)
+        ttk.Label(form,text='发票号码').grid(row=0,column=0,sticky='w',padx=(0,12),pady=4)
+        self.number_entry = ttk.Combobox(form,textvariable=self.number,font=('Consolas',13))
+        self.number_entry.grid(row=0,column=1,sticky='ew',pady=4)
+        ttk.Label(form,text='发票代码').grid(row=1,column=0,sticky='w',padx=(0,12),pady=4)
+        ttk.Entry(form,textvariable=self.code,font=('Consolas',12)).grid(row=1,column=1,sticky='ew',pady=4)
+        help_label = ttk.Label(form,text='传统发票可填写代码；20 位数电票留空。',foreground=MUTED,wraplength=460)
+        help_label.grid(row=2,column=0,columnspan=2,sticky='w',pady=4)
+        actions = ttk.Frame(right)
+        actions.pack(fill='x')
+        ttk.Button(actions,text='保存并确认',command=self.confirm,style='Primary.TButton').pack(side='left')
+        ttk.Button(actions,text='下一条待复核',command=self.next_review).pack(side='right')
+        reason_label = ttk.Label(right,textvariable=self.reason,wraplength=460,foreground=MUTED)
+        reason_label.pack(fill='x',pady=(8,0))
+        right.bind('<Configure>',lambda event: [label.configure(wraplength=max(100,event.width-20))
+                                                for label in (caption_label,help_label,reason_label)])
+        progress = ttk.Frame(self.root,padding=(20,4,20,12))
+        progress.pack(fill='x')
+        ttk.Label(progress,textvariable=self.progress_text,foreground=MUTED).pack(anchor='w')
+        self.progress = ttk.Progressbar(progress,mode='determinate')
+        self.progress.pack(fill='x',pady=(8,0))
+        self.render()
+
+    def choose_files(self):
+        paths = filedialog.askopenfilenames(title='选择发票',filetypes=[
+            ('发票文件','*.pdf *.PDF *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.txt'),('所有文件','*.*')])
+        if paths:
+            self.import_paths(paths)
+
+    def choose_folder(self):
+        path = filedialog.askdirectory(title='选择解压后的发票文件夹（包含子目录）')
+        if path:
+            self.import_paths([path])
+
+    def import_paths(self, paths):
+        if self.busy:
+            messagebox.showinfo('正在识别','本批处理完毕后可继续添加文件。',parent=self.root)
+            return
+        files = [p for p in collect_inputs(paths) if str(p).casefold() not in self.paths_seen]
+        if not files:
+            messagebox.showinfo('没有新文件','支持 PDF、图片和 TXT。RAR/ZIP 请先解压；已导入的文件不会重复添加。',parent=self.root)
+            return
+        self.stop = Event()
+        self.reader.stop = self.stop
+        self.reader.single_invoice = self.single_invoice.get()
+        self.set_busy(True)
+        self.progress.configure(maximum=len(files),value=0)
+        def work():
+            # Imports are sequential (busy guard); retain the expensive OCR
+            # sessions for the next batch instead of loading models again.
+            reader = self.reader
+            completed = []
+            try:
+                for index,path in enumerate(files):
+                    if self.stop.is_set():
+                        break
+                    self.queue.put(('progress',(index,len(files),path.name)))
+                    for row in reader.read(path):
+                        self.queue.put(('row',row))
+                    if not self.stop.is_set():
+                        completed.append(str(path).casefold())
+                self.queue.put(('done',completed))
+            except Exception as exc:
+                self.queue.put(('error',str(exc)))
+        Thread(target=work,daemon=True).start()
+
+    def set_busy(self, busy):
+        self.busy = busy
+        self.fast_check.configure(state='disabled' if busy else 'normal')
+        for button in self.import_buttons+[self.clear_button]:
+            button.configure(state='disabled' if busy else 'normal')
+        self.stop_button.configure(state='normal' if busy else 'disabled')
+        self.export_button.configure(state='disabled' if busy else 'normal')
+
+    def poll(self):
+        new_rows = []
+        try:
+            while True:
+                kind,data = self.queue.get_nowait()
+                if kind == 'row':
+                    new_rows.append(data)
+                elif kind == 'progress':
+                    index,count,name = data
+                    self.progress.configure(value=index)
+                    self.progress_text.set(f'正在处理 {index+1}/{count}：{name}')
+                elif kind == 'done':
+                    self.paths_seen.update(data)
+                    self.set_busy(False)
+                    self.progress.configure(value=len(data) if self.stop.is_set() else self.progress['maximum'])
+                    self.progress_text.set('已停止，已读取结果可导出。' if self.stop.is_set() else '识别完成。选择结果核对，修改后点击“保存并确认”。')
+                elif kind == 'error':
+                    self.set_busy(False)
+                    self.progress_text.set('处理异常，已读取结果仍可导出。')
+                    messagebox.showerror('处理异常',data,parent=self.root)
+        except Empty:
+            pass
+        if new_rows:
+            self.add_rows(new_rows)
+        self.root.after(120,self.poll)
+
+    def add_rows(self, rows):
+        self.rows.extend(rows)
+        self.dirty = True
+        self.refresh()
+        if self.selected is None and self.rows:
+            self.tree.selection_set('0')
+            self.tree.focus('0')
+
+    def refresh(self):
+        mark_duplicates(self.rows)
+        for index,row in enumerate(self.rows):
+            values = (Path(row.source).name,row.page,row.invoice_number or '—',row.status,
+                      '第 '+row.duplicate_of+' 条' if row.duplicate_of else '')
+            if self.tree.exists(str(index)):
+                self.tree.item(str(index),values=values,tags=(row.status,))
+            else:
+                self.tree.insert('','end',iid=str(index),values=values,tags=(row.status,))
+        good = sum(r.status in ('已识别','已确认') for r in self.rows)
+        review = len(self.rows)-good
+        duplicates = sum(bool(r.duplicate_of) for r in self.rows)
+        self.summary.set(f'{len(self.rows)} 条结果  ·  已识别/确认 {good}  ·  待处理 {review}  ·  重复 {duplicates}')
+
+    def select(self, _=None):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        index = int(selected[0])
+        if index == self.selected and self.form_changed():
+            return
+        if self.selected is not None and self.selected != index and self.form_changed():
+            choice = messagebox.askyesnocancel('修改尚未保存','保存当前号码修改并确认后，切换到下一条？',parent=self.root)
+            if choice is True:
+                try:
+                    confirm_record(self.rows[self.selected],self.number.get(),self.code.get())
+                    self.dirty = True
+                    self.refresh()
+                except ValueError as exc:
+                    messagebox.showerror('号码格式不正确',str(exc),parent=self.root)
+                    choice = None
+            if choice is None:
+                self.tree.selection_set(str(self.selected))
+                return
+        self.selected = index
+        row = self.rows[self.selected]
+        self.number.set(row.invoice_number)
+        self.code.set(row.invoice_code)
+        self.number_entry.configure(values=row.candidates)
+        self.reason.set(row.reason)
+        self.caption.set(f'{Path(row.source).name}  ·  第 {row.page} 页')
+        try:
+            self.preview = preview_image(row)
+        except Exception as exc:
+            self.preview = None
+            self.reason.set(row.reason+'\n无法预览：'+str(exc))
+        self.render()
+
+    def schedule_render(self, _=None):
+        if self._render_timer:
+            self.root.after_cancel(self._render_timer)
+        self._render_timer = self.root.after(100,self.render)
+
+    def render(self):
+        from PIL import Image, ImageDraw, ImageTk
+        self._render_timer = None
+        self.canvas.delete('all')
+        self.crop_canvas.delete('all')
+        if self.preview is None:
+            self.canvas.create_text(max(self.canvas.winfo_width(),300)//2,110,
+                                    text='选择结果查看票面\n\n支持 PDF、图片和文字',fill=MUTED,
+                                    font=('Microsoft YaHei UI',11),justify='center')
+            if self.selected is not None:
+                self.crop_canvas.create_text(12,18,anchor='nw',text=self.rows[self.selected].evidence[:70],fill=INK)
+            return
+        image = self.preview.copy()
+        row = self.rows[self.selected]
+        bounds = None
+        if row.bbox:
+            w,h = image.size
+            x0,y0,x1,y1 = row.bbox
+            bounds = (max(0,int(x0*w)-12),max(0,int(y0*h)-10),min(w,int(x1*w)+12),min(h,int(y1*h)+10))
+            ImageDraw.Draw(image).rectangle(bounds,outline='#B22E38',width=3)
+        image.thumbnail((max(100,self.canvas.winfo_width()-16),max(100,self.canvas.winfo_height()-16)),Image.Resampling.LANCZOS)
+        self._photo = ImageTk.PhotoImage(image,master=self.root)
+        self.canvas.create_image(self.canvas.winfo_width()/2,self.canvas.winfo_height()/2,image=self._photo)
+        if bounds and bounds[2]>bounds[0] and bounds[3]>bounds[1]:
+            crop = self.preview.crop(bounds)
+            factor = min(max(100,self.crop_canvas.winfo_width()-16)/crop.width,54/crop.height,3)
+            crop = crop.resize((max(1,int(crop.width*factor)),max(1,int(crop.height*factor))),Image.Resampling.LANCZOS)
+            self._crop_photo = ImageTk.PhotoImage(crop,master=self.root)
+            self.crop_canvas.create_image(self.crop_canvas.winfo_width()/2,33,image=self._crop_photo)
+
+    def confirm(self):
+        if self.selected is None:
+            return
+        try:
+            confirm_record(self.rows[self.selected],self.number.get(),self.code.get())
+        except ValueError as exc:
+            messagebox.showerror('号码格式不正确',str(exc),parent=self.root)
+            return
+        self.dirty = True
+        self.number.set(self.rows[self.selected].invoice_number)
+        self.code.set(self.rows[self.selected].invoice_code)
+        self.refresh()
+        self.select()
+
+    def next_review(self):
+        start = self.selected+1 if self.selected is not None else 0
+        order = list(range(start,len(self.rows)))+list(range(start))
+        for index in order:
+            if self.rows[index].status not in ('已识别','已确认'):
+                self.tree.selection_set(str(index))
+                self.tree.focus(str(index))
+                self.tree.see(str(index))
+                return
+        self.progress_text.set('没有待复核或未识别的结果。')
+
+    def paste(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title('粘贴发票文字或号码')
+        dialog.geometry('660x430')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        ttk.Label(dialog,text='可粘贴发票全文，或每行一个号码。纯号码需要人工确认。',padding=12).pack(anchor='w')
+        text = tk.Text(dialog,font=('Microsoft YaHei UI',11),wrap='word',undo=True)
+        text.pack(fill='both',expand=True,padx=12,pady=8)
+        text.focus_set()
+        def submit():
+            try:
+                rows = parse_text(text.get('1.0','end'))
+            except ValueError as exc:
+                messagebox.showerror('无法读取',str(exc),parent=dialog)
+                return
+            self.add_rows(rows)
+            dialog.destroy()
+        ttk.Button(dialog,text='读取文字',command=submit,style='Primary.TButton').pack(anchor='e',padx=12,pady=12)
+
+    def export(self):
+        if not self.rows:
+            messagebox.showinfo('暂无结果','请先添加发票。',parent=self.root)
+            return
+        if self.form_changed():
+            messagebox.showinfo('修改尚未保存','请先点击“保存并确认”，再导出。',parent=self.root)
+            return
+        path = filedialog.asksaveasfilename(title='导出全部识别结果',defaultextension='.xlsx',
+                                          initialfile='发票号码.xlsx',filetypes=[('Excel 工作簿','*.xlsx')])
+        if not path:
+            return
+        try:
+            export_excel(self.rows,path)
+        except Exception as exc:
+            messagebox.showerror('导出失败','请检查文件是否正在 Excel 中打开。\n'+str(exc),parent=self.root)
+            return
+        self.dirty = False
+        self.progress_text.set('已导出：'+path)
+
+    def cancel(self):
+        self.stop.set()
+        self.stop_button.configure(state='disabled')
+        self.progress_text.set('正在停止，当前 OCR 完成后保留已有结果。')
+
+    def clear(self):
+        if (self.dirty or self.form_changed()) and not messagebox.askyesno('清空结果','结果尚未导出，仍要清空吗？',parent=self.root):
+            return
+        self.rows.clear()
+        self.paths_seen.clear()
+        self.tree.delete(*self.tree.get_children())
+        self.selected = None
+        self.preview = None
+        self.dirty = False
+        self.number.set('')
+        self.code.set('')
+        self.reason.set('')
+        self.caption.set('选择一条结果，查看原件并核对号码。')
+        self.progress.configure(value=0)
+        self.refresh()
+        self.render()
+
+    def close(self):
+        if self.busy:
+            messagebox.showinfo('正在识别','请先停止识别，保留结果后再退出。',parent=self.root)
+            return
+        if (self.dirty or self.form_changed()) and not messagebox.askyesno('退出程序','结果尚未导出，仍要退出吗？',parent=self.root):
+            return
+        self.root.destroy()
+
+    def form_changed(self):
+        if self.selected is None:
+            return False
+        row = self.rows[self.selected]
+        return (self.number.get(),self.code.get()) != (row.invoice_number,row.invoice_code)
+
+
+def create_app():
+    import sys
+    if sys.platform == 'win32':
+        import ctypes
+        # Use physical pixels for Tk, preview and screenshots on scaled Windows displays.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    root = TkinterDnD.Tk()
+    app = InvoiceApp(root)
+    root.drop_target_register(DND_FILES)
+    def dropped(event):
+        app.import_paths(root.tk.splitlist(event.data))
+        return event.action
+    root.dnd_bind('<<Drop>>',dropped)
+    return root,app

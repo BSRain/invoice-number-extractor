@@ -1,0 +1,64 @@
+# 发票号码提取工具 1.2
+
+## 使用便携版
+
+适用 Windows 10/11 x64。完整解压 `发票号码提取工具-1.2.0-Windows.zip`，双击 `InvoiceReader.exe`。保留旁边的 `_internal` 文件夹，OCR 模型和运行库都在里面。运行时不联网，不上传发票。
+
+1. RAR/ZIP 发票包请先解压。
+2. 把 PDF、图片或发票文件夹拖入窗口，或点击“添加文件 / 添加文件夹”。文件夹会包含子目录。支持 PDF、JPG/JPEG、PNG、BMP、TIF/TIFF 和 TXT。
+3. 左侧显示每页结果，右侧显示原件及号码区域。20 位数电票号码与 8 位传统号码均可读取，传统发票代码另列。
+4. “待复核”表示低质量识别或候选冲突；“未识别 / 失败”也会保留一条记录，请检查原件后补录。“下一条待复核”会依次定位这些记录。
+5. 修改后点击“保存并确认”。号码必须是完整的 8 位或 20 位数字；代码可填 10/12 位数字或留空。程序不会猜测 O/0、I/1 等模糊字符。
+6. 点击“导出全部 Excel”，工作簿包含“全部发票号”汇总表和“发票号码”明细表。所有已扫描结果均保留，包括重复、待复核、未识别和失败记录；候选冲突时号码留空，候选另列。号码按文本保存，不会丢失前导零或被 Excel 截断。
+
+1.1 优化：票面方向明确且各号码区域已有完整号码时，不再因分数低而反复旋转整页，分数低仍标记待复核。继续扫描整页以保留同页多张票；后续导入批次复用 OCR 模型，直到退出程序。第一次识别仍需加载模型。
+
+1.2 优化：默认使用最多 4 个 OCR 推理线程。窗口中可勾选“快速模式（每页只有一张发票）”，先定位方向再识别上方 40% 票面，完整号码必须通过原有置信度规则；传统票还需读到可靠代码。缺失、低分、冲突及裁剪失败会回退整页。该选项是“一页一票”的输入约定，不能自动判断下半页是否还有其他发票；拼图、多票页请保持未勾选。疑难票回退会多一次尝试，可能更慢。
+
+结果缓存仅在本次运行的内存中，最多 32 份内容 / 200 条结果，按文件内容 SHA-256、文件类型和模式匹配。同内容副本可直接读取；文件内容改变则失效。原始识别结果与人工修改互不影响，不缓存失败或中途停止的文件。已导入路径仍不会重复添加；清空结果后再次导入可复用缓存，退出程序后缓存消失。
+
+重复记录保留来源：20 位号码按号码判断；传统票必须同时有代码和号码才自动判重。同一张发票跨多页出现也会标记重复，重复并不代表票据无效。导出中的“重复于第几条”指识别结果的记录序号，不含表头。
+
+识别结果应以原件为准，“已识别”表示程序规则匹配通过，不是税务真伪查验。建议财务使用前核对票面。本版本覆盖给定样例的常见印刷票；手写、严重模糊、同一页混合不同方向、复杂拼图可能需要人工补录。
+
+快捷键：Ctrl+O 添加文件；Ctrl+S 导出；Ctrl+Enter 保存并确认。处理中点击“停止识别”，当前 OCR 完成后可导出已有结果；部分文件重新导入时会重新读取各页，已出现的号码仍保留并判重。
+
+密码保护的 PDF 请先解锁。TXT 默认按 UTF-8 读取，兼容 GB18030。图片最多 3000 万像素，超过时请先缩小。原件不会被修改；本批结果只保存在内存，关闭前请导出 Excel。
+
+## 运行源代码 / 批处理
+
+Python 3.12 / Windows x64，在项目根目录运行：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r invoice_tool\requirements.txt
+.venv\Scripts\python.exe -m invoice_tool
+```
+
+```powershell
+.venv\Scripts\python.exe -m invoice_tool --input "D:\发票文件夹" --output "D:\结果.xlsx"
+```
+
+可以多个输入：`--input "D:\发票1.pdf" "D:\扫描件"`。可选 `--report "D:\明细.json"` 保存完整候选与位置。默认不替换已有输出；明确需要覆盖时加 `--overwrite`。
+
+确定每页只有一张票时，可加 `--single-invoice` 使用快速模式。默认命令保持整页识别。
+
+## 测试与构建
+
+```powershell
+.venv\Scripts\python.exe -m unittest discover -s invoice_tool\tests -v
+.venv\Scripts\python.exe -m invoice_tool --smoke-test "tmp\发票界面验证"
+.venv\Scripts\python.exe -m pip install -r invoice_tool\requirements-build.txt
+.venv\Scripts\python.exe invoice_tool\build.py
+```
+
+便携包位于 `releases/`，源代码和许可证附在包内。`--smoke-test` 仅在明确指定时生成合成测试发票、验证报告和截图，不访问用户发票。已在本机验证，未在全新未安装 Python 的 Windows 电脑验证。
+
+## 技术参考
+
+- [PyMuPDF 文字坐标与页面渲染](https://pymupdf.readthedocs.io/en/latest/page.html)
+- [RapidOCR 1.4.4 本地 OCR 接口](https://rapidai.github.io/RapidOCRDocs/v1.4.4/install_usage/api/RapidOCR/)
+- [TkinterDnD2 原生文件拖放](https://github.com/pmgagne/tkinterdnd2)
+- [PyInstaller 运行路径](https://pyinstaller.org/en/stable/runtime-information.html)
+
+PyMuPDF 为 AGPL/商业双许可项目，其余第三方依赖许可见便携包 `licenses/`。真实发票、识别结果与运行时环境不提交 Git。

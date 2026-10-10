@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.tools/
+tmp/
+output/
+build/
+dist/
+releases/
+*.xlsx
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.rar
+*.zip
