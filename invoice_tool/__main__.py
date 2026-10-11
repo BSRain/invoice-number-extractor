@@ -13,6 +13,7 @@ def main(argv=None):
     parser.add_argument('--report',help='可选 JSON 明细输出路径')
     parser.add_argument('--overwrite',action='store_true',help='允许替换已有输出文件')
     parser.add_argument('--single-invoice',action='store_true',help='快速模式：输入每页只有一张发票，疑难票回退整页')
+    parser.add_argument('--workers',type=int,choices=(1,2),default=1,help='同时处理文件数：1（默认）或 2')
     parser.add_argument('--smoke-test',metavar='DIRECTORY',help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.smoke_test:
@@ -38,18 +39,27 @@ def main(argv=None):
                 parser.error('输出文件已存在。换一个路径或使用 --overwrite。')
         reader = InvoiceReader(single_invoice=args.single_invoice)
         rows = []
-        for path in files:
-            for row in reader.read(path):
-                rows.append(row)
-                if sys.stdout:
-                    print(f'{path.name} / {row.page}: {row.invoice_number or "—"} [{row.status}]',flush=True)
+        def consume(row):
+            rows.append(row)
+            if sys.stdout:
+                print(f'{Path(row.source).name} / {row.page}: {row.invoice_number or "—"} [{row.status}]',flush=True)
+        if args.workers == 2 and len(files) > 1:
+            from invoice_tool.pipeline import ParallelReader
+            with ParallelReader() as pool:
+                for kind,value in pool.read(files,single_invoice=args.single_invoice):
+                    if kind == 'row':
+                        consume(value)
+        else:
+            for path in files:
+                for row in reader.read(path):
+                    consume(row)
         export_excel(rows,output)
         if report:
             report.write_text(json.dumps([asdict(r) for r in rows],ensure_ascii=False,indent=2),encoding='utf-8')
         if sys.stdout:
             print(f'已导出 {len(rows)} 条：{output}')
         return 0
-    if args.output or args.report or args.single_invoice:
+    if args.output or args.report or args.single_invoice or args.workers != 1:
         parser.error('--output/--report 需要同时指定 --input。')
     from invoice_tool.gui import create_app
     root,_ = create_app()
@@ -58,6 +68,8 @@ def main(argv=None):
 
 
 def entry():
+    import multiprocessing
+    multiprocessing.freeze_support()
     try:
         return main()
     except Exception as exc:

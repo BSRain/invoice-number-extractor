@@ -1,8 +1,8 @@
-# 发票号码提取工具 1.4
+# 发票号码提取工具 1.5
 
 ## 使用便携版
 
-适用 Windows 10/11 x64。完整解压 `发票号码提取工具-1.4.0-Windows.zip`，双击 `InvoiceReader.exe`。保留旁边的 `_internal` 文件夹，OCR 模型和运行库都在里面。运行时不联网，不上传发票。
+适用 Windows 10/11 x64。完整解压 `发票号码提取工具-1.5.0-Windows.zip`，双击 `InvoiceReader.exe`。保留旁边的 `_internal` 文件夹，OCR 模型和运行库都在里面。运行时不联网，不上传发票。
 
 1. RAR/ZIP 发票包请先解压。
 2. 把 PDF、图片或发票文件夹拖入窗口，或点击“添加文件 / 添加文件夹”。文件夹会包含子目录。支持 PDF、JPG/JPEG、PNG、BMP、TIF/TIFF 和 TXT。
@@ -10,6 +10,12 @@
 4. “待复核”表示低质量识别或候选冲突；“未识别 / 失败”也会保留一条记录，请检查原件后补录。“下一条待复核”会依次定位这些记录。
 5. 修改后点击“保存并确认”。号码必须是完整的 8 位或 20 位数字；代码可填 10/12 位数字或留空。程序不会猜测 O/0、I/1 等模糊字符。
 6. 点击“导出全部 Excel”，工作簿包含“全部发票号”汇总表和“发票号码”明细表。所有已扫描结果均保留，包括重复、待复核、未识别和失败记录；候选冲突时号码留空，候选另列。号码按文本保存，不会丢失前导零或被 Excel 截断。
+
+1.5 新增：勾选“并行处理（同时识别两个文件）”可使用两个独立进程，适合多份扫描件。两个进程分别保存模型供后续批次复用，PDF 对象、模型和识别缓存互不共享。默认关闭；只导入一个文件时沿用原路径。首批需要创建进程及加载模型，额外占用内存；纯文字层 PDF、少量文件或 CPU 资源紧张时可能更慢。结果仍按输入文件和页码顺序显示，人工复核、重复标记与 Excel 全量导出不变。
+
+后台最多同时处理两个文件，每个进程的单次模型推理最多 4 个线程，且不超过逻辑 CPU 数的一半（至少 1 个）。哪个进程先完成就分配下一文件，最多提前调度 4 份，已完成的后续结果等待前面的文件按序显示。每个进程的输出队列最多 8 条，每个暂存文件最多 8 条，界面待显示队列最多 128 条；不会一次性排入整个目录或预先渲染所有页面。停止后不再启动新文件，等待已在执行的 OCR 返回，按顺序保留已读取的结果。未完整读取的文件可再次导入；已完成的文件仍避免重复导入。退出会清理后台进程，发生进程异常时提示重试。
+
+并行缓存分配为每个进程最多 16 份 / 100 条，两个进程合计最多 32 份 / 200 条。串行读取器仍单独最多 32 份 / 200 条；切换过两种模式时，两组缓存和已经加载的模型会同时保留，退出后释放。同内容副本只有分配到保留其缓存的进程才会命中，不跨进程传递模型或缓存。
 
 1.1 优化：票面方向明确且各号码区域已有完整号码时，不再因分数低而反复旋转整页，分数低仍标记待复核。继续扫描整页以保留同页多张票；后续导入批次复用 OCR 模型，直到退出程序。第一次识别仍需加载模型。
 
@@ -47,6 +53,12 @@ python -m venv .venv
 
 确定每页只有一张票时，可加 `--single-invoice` 使用快速模式。默认命令保持整页识别。
 
+多文件并行可加 `--workers 2`；默认 `--workers 1`。例如：
+
+```powershell
+.venv\Scripts\python.exe -m invoice_tool --input "D:\扫描件" --output "D:\全部发票号.xlsx" --single-invoice --workers 2
+```
+
 ## 测试与构建
 
 ```powershell
@@ -61,6 +73,8 @@ python -m venv .venv
 ## 技术参考
 
 - [PyMuPDF 文字坐标与页面渲染](https://pymupdf.readthedocs.io/en/latest/page.html)
+- [PyMuPDF 使用多进程，禁止多线程并发](https://pymupdf.readthedocs.io/en/latest/recipes-multiprocessing.html)
+- [Python multiprocessing 的 spawn 与 freeze_support](https://docs.python.org/3.12/library/multiprocessing.html)
 - [RapidOCR 1.4.4 本地 OCR 接口](https://rapidai.github.io/RapidOCRDocs/v1.4.4/install_usage/api/RapidOCR/)
 - [TkinterDnD2 原生文件拖放](https://github.com/pmgagne/tkinterdnd2)
 - [PyInstaller 运行路径](https://pyinstaller.org/en/stable/runtime-information.html)

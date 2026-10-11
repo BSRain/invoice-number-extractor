@@ -150,6 +150,48 @@ def run_smoke(folder):
         assert len(detection_calls) == 1
         app.reader.fast_header = previous_header
         assert app.reader.cache_hits == 1
+        # Real independent OCR workers, ordered duplicates, and process reuse.
+        app.parallel.set(True)
+        parallel_files = [folder/f'并行扫描件{i}.png' for i in range(2)]
+        for index,path in enumerate(parallel_files):
+            # Keep different image content so neither result can be cached.
+            with Image.open(second) as image:
+                image.putpixel((0,0),(index,0,0))
+                image.save(path)
+        app.import_paths(parallel_files)
+        assert str(app.parallel_check['state']) == 'disabled'
+        deadline = time.monotonic()+120
+        while app.busy and time.monotonic()<deadline:
+            root.update()
+            time.sleep(.03)
+        root.update()
+        assert not app.busy
+        assert len(app.rows) == 8
+        assert [r.source for r in app.rows[-2:]] == list(map(str,parallel_files))
+        assert all((r.invoice_number,r.invoice_code,r.rotation,r.duplicate_of)
+                   == ('00123456','3100214130',90,'2') for r in app.rows[-2:])
+        worker_pids = app.parallel_reader.pids
+        assert len(set(worker_pids)) == 2
+        next_files = [folder/f'并行第二批{i}.png' for i in range(2)]
+        for source,target in zip(parallel_files,next_files):
+            target.write_bytes(source.read_bytes())
+        app.import_paths(next_files)
+        deadline = time.monotonic()+120
+        while app.busy and time.monotonic()<deadline:
+            root.update()
+            time.sleep(.03)
+        root.update()
+        assert not app.busy
+        assert app.parallel_reader.pids == worker_pids
+        assert len(app.rows) == 10
+        assert all(r.invoice_number == '00123456' for r in app.rows[-2:])
+        from .core import export_excel
+        export_excel(app.rows,exported)
+        book = load_workbook(exported)
+        assert all(sheet.max_row == 11 for sheet in book)
+        assert book.active['B11'].value == '00123456'
+        assert book.active['B11'].data_type == 's'
+        book.close()
         app.tree.selection_set('1')
         app.tree.focus('1')
         app.tree.see('1')
@@ -176,7 +218,8 @@ def run_smoke(folder):
                   'GUI background processing','manual correction','unsaved edit protection',
                   'duplicate marking','Excel text values','all-record Excel summary',
                   'OCR model reuse across batches','content cache for copied files',
-                  'fast-mode reused detection with one detector call and rotated preview'],
+                  'fast-mode reused detection with one detector call and rotated preview',
+                  'two real OCR processes, ordered results, reuse and all-row Excel'],
                   'records':[asdict(r) for r in app.rows]}
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0
@@ -187,4 +230,5 @@ def run_smoke(folder):
         return 1
     finally:
         if root is not None:
+            app.parallel_reader.close()
             root.destroy()

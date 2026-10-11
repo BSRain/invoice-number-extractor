@@ -7,6 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .core import confirm_record, export_excel, mark_duplicates
 from .reader import InvoiceReader, SUPPORTED, collect_inputs, parse_text, preview_image
+from .pipeline import ParallelReader
 
 BG, INK, MUTED, ACCENT = '#F3F5F7', '#18334D', '#546579', '#176B57'
 
@@ -16,9 +17,10 @@ class InvoiceApp:
         self.root = root
         self.rows = []
         self.paths_seen = set()
-        self.queue = Queue()
+        self.queue = Queue(maxsize=128)
         self.stop = Event()
         self.reader = InvoiceReader(self.stop)
+        self.parallel_reader = ParallelReader()
         self.busy = False
         self.dirty = False
         self.selected = None
@@ -28,6 +30,7 @@ class InvoiceApp:
         self.number = tk.StringVar()
         self.code = tk.StringVar()
         self.single_invoice = tk.BooleanVar(value=False)
+        self.parallel = tk.BooleanVar(value=False)
         self.caption = tk.StringVar(value='选择一条结果，查看原件并核对号码。')
         self.reason = tk.StringVar()
         self.summary = tk.StringVar(value='暂无结果')
@@ -78,6 +81,12 @@ class InvoiceApp:
                                           variable=self.single_invoice)
         self.fast_check.pack(side='left')
         ttk.Label(options,text='同页多张票请保持未勾选；快速模式遇疑难结果会回退整页。',
+                  foreground=MUTED).pack(side='left',padx=16)
+        parallel_options = ttk.Frame(self.root,padding=(20,0,20,4))
+        parallel_options.pack(fill='x')
+        self.parallel_check = ttk.Checkbutton(parallel_options,text='并行处理（同时识别两个文件）',variable=self.parallel)
+        self.parallel_check.pack(side='left')
+        ttk.Label(parallel_options,text='适合多份扫描件；首次加载两个模型会增加耗时和内存。',
                   foreground=MUTED).pack(side='left',padx=16)
         panes = ttk.Panedwindow(self.root,orient='horizontal')
         panes.pack(fill='both',expand=True,padx=20,pady=8)
@@ -163,6 +172,8 @@ class InvoiceApp:
         self.stop = Event()
         self.reader.stop = self.stop
         self.reader.single_invoice = self.single_invoice.get()
+        parallel = self.parallel.get() and len(files) > 1
+        single_invoice = self.single_invoice.get()
         self.set_busy(True)
         self.progress.configure(maximum=len(files),value=0)
         def work():
@@ -171,6 +182,14 @@ class InvoiceApp:
             reader = self.reader
             completed = []
             try:
+                if parallel:
+                    for kind,value in self.parallel_reader.read(files,self.stop,single_invoice):
+                        if kind == 'complete':
+                            completed.append(str(value).casefold())
+                        else:
+                            self.queue.put((kind,value))
+                    self.queue.put(('done',completed))
+                    return
                 for index,path in enumerate(files):
                     if self.stop.is_set():
                         break
@@ -187,6 +206,7 @@ class InvoiceApp:
     def set_busy(self, busy):
         self.busy = busy
         self.fast_check.configure(state='disabled' if busy else 'normal')
+        self.parallel_check.configure(state='disabled' if busy else 'normal')
         for button in self.import_buttons+[self.clear_button]:
             button.configure(state='disabled' if busy else 'normal')
         self.stop_button.configure(state='normal' if busy else 'disabled')
@@ -401,6 +421,7 @@ class InvoiceApp:
             return
         if (self.dirty or self.form_changed()) and not messagebox.askyesno('退出程序','结果尚未导出，仍要退出吗？',parent=self.root):
             return
+        self.parallel_reader.close()
         self.root.destroy()
 
     def form_changed(self):

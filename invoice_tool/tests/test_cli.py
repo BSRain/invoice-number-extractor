@@ -44,6 +44,28 @@ class CliTests(unittest.TestCase):
                       '--report',str(source),'--overwrite'])
             self.assertEqual(source.read_text(encoding='utf-8'),'发票号码：00123456')
 
+    def test_parallel_cli_preserves_order_failures_and_excel_text(self):
+        import json
+        from openpyxl import load_workbook
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = [root/'first.txt',root/'broken.pdf',root/'last.txt']
+            paths[0].write_text('发票号码：00123456',encoding='utf-8')
+            paths[1].write_bytes(b'broken')
+            paths[2].write_text('发票号码：26000000000000000001',encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(['--input',*map(str,paths),'--workers','2',
+                    '--output',str(root/'all.xlsx'),'--report',str(root/'all.json')]),0)
+            rows = json.loads((root/'all.json').read_text(encoding='utf-8'))
+            self.assertEqual([r['source'] for r in rows],list(map(str,paths)))
+            self.assertEqual(rows[1]['status'],'失败')
+            book = load_workbook(root/'all.xlsx')
+            self.assertEqual([sheet.max_row for sheet in book],[4,4])
+            self.assertEqual(book.active['B2'].value,'00123456')
+            self.assertEqual(book.active['B4'].value,'26000000000000000001')
+            self.assertEqual(book.active['B4'].data_type,'s')
+            book.close()
+
 
 if __name__ == '__main__':
     unittest.main()

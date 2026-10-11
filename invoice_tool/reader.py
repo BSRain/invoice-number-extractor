@@ -92,12 +92,16 @@ def preview_image(row, max_side=1800):
 
 
 class InvoiceReader:
-    def __init__(self, stop=None, single_invoice=False):
+    def __init__(self, stop=None, single_invoice=False, threads=None,
+                 cache_files=None, cache_records=None):
         self.stop = stop if stop is not None else Event()
         self.single_invoice = single_invoice
         self._engine = None
         self._cache = OrderedDict()
         self.cache_hits = 0
+        self.threads = min(threads or 4,os.cpu_count() or 2)
+        self.cache_files = MAX_CACHE_FILES if cache_files is None else cache_files
+        self.cache_records = MAX_CACHE_RECORDS if cache_records is None else cache_records
 
     def native_boxes(self, page):
         import pymupdf as fitz
@@ -116,7 +120,7 @@ class InvoiceReader:
     def engine(self):
         if self._engine is None:
             from rapidocr_onnxruntime import RapidOCR
-            self._engine = RapidOCR(intra_op_num_threads=min(4,os.cpu_count() or 2), inter_op_num_threads=1,
+            self._engine = RapidOCR(intra_op_num_threads=self.threads, inter_op_num_threads=1,
                                     max_side_len=MAX_OCR_SIDE, det_limit_side_len=1200,
                                     det_limit_type='max', text_score=.5)
         return self._engine
@@ -348,7 +352,7 @@ class InvoiceReader:
         cacheable = True
         for row in self._read_uncached(path):
             # Copy before yielding: GUI edits must never alter cached OCR data.
-            if cacheable and len(saved) == MAX_CACHE_RECORDS:
+            if cacheable and len(saved) == self.cache_records:
                 saved.clear()
                 cacheable = False
             if cacheable:
@@ -364,8 +368,8 @@ class InvoiceReader:
         except OSError:
             return
         self._cache[key] = saved
-        while (len(self._cache) > MAX_CACHE_FILES
-               or sum(len(rows) for rows in self._cache.values()) > MAX_CACHE_RECORDS):
+        while (len(self._cache) > self.cache_files
+               or sum(len(rows) for rows in self._cache.values()) > self.cache_records):
             self._cache.popitem(last=False)
 
     def _read_uncached(self, raw_path):
