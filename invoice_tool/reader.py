@@ -15,6 +15,7 @@ MAX_DECODE_PIXELS = 30_000_000
 MAX_OCR_SIDE = 2400
 MAX_CACHE_RECORDS = 200
 MAX_CACHE_FILES = 32
+FAST_BAND_MIN_WIDTH = 1400
 
 
 def collect_inputs(paths):
@@ -151,9 +152,31 @@ class InvoiceReader:
         oriented = image.rotate(angle,expand=True) if angle else image
         width,height = oriented.size
         bottom = max(1,int(height*.4))
-        boxes = self.ocr_boxes(oriented.crop((0,0,width,bottom)))
-        boxes = [TextBox(b.text,(b.bbox[0],b.bbox[1]*bottom/height,
-                                 b.bbox[2],b.bbox[3]*bottom/height),b.confidence) for b in boxes]
+        header = oriented.crop((0,0,width,bottom))
+        if width > FAST_BAND_MIN_WIDTH:
+            # Keep original pixels; a narrower first pass saves recognition
+            # work without degrading small digits. Failed fields use the
+            # original 40% header, then the standard full-page fallback.
+            band_bottom = max(1,int(height*.25))
+            boxes = self.header_boxes(oriented.crop((0,0,width,band_bottom)),0,band_bottom,height)
+            rows = self.accept_header(boxes,angle,'号码区域高清识别')
+            if rows is not None or self.stop.is_set():
+                return rows
+            incomplete = extract_invoices(boxes,'ocr')
+            labelled = any(NUMBER_LABEL.search(normalize(b.text)) for b in boxes)
+            if labelled and len(incomplete) == 1 and incomplete[0].invoice_number:
+                # A complete but unreliable value needs the full-page context.
+                # Do not add a second header attempt to already difficult pages.
+                return None
+        boxes = self.header_boxes(header,0,bottom,height)
+        return self.accept_header(boxes,angle,'票头识别')
+
+    def header_boxes(self,image,top,bottom,page_height):
+        return [TextBox(b.text,(b.bbox[0],(top+b.bbox[1]*(bottom-top))/page_height,
+                               b.bbox[2],(top+b.bbox[3]*(bottom-top))/page_height),b.confidence)
+                for b in self.ocr_boxes(image)]
+
+    def accept_header(self,boxes,angle,stage):
         rows = extract_invoices(boxes,'ocr')
         if self.stop.is_set():
             return None
@@ -165,7 +188,7 @@ class InvoiceReader:
         if len(row.invoice_number) == 8 and not row.invoice_code:
             return None
         row.rotation = angle
-        row.reason = '快速模式：票头识别。'+row.reason
+        row.reason = f'快速模式：{stage}。'+row.reason
         return rows
 
     def recognize_image(self, image):

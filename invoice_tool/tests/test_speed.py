@@ -68,6 +68,50 @@ class FastModeTests(unittest.TestCase):
             reader.recognize_image(self.image)
         fast.assert_not_called()
 
+    def test_large_page_first_pass_keeps_original_pixels_and_maps_coordinates(self):
+        reader=InvoiceReader(single_invoice=True)
+        with patch.object(reader,'engine') as engine,patch.object(reader,'ocr_boxes',return_value=self.boxes) as ocr:
+            engine.return_value.return_value=(self.detector,[.1])
+            row=reader.recognize_image(Image.new('RGB',(2400,1600)))[0]
+        self.assertEqual(ocr.call_count,1)
+        self.assertEqual(ocr.call_args.args[0].size,(2400,400))
+        self.assertAlmostEqual(row.bbox[1],.05)
+        self.assertEqual(row.invoice_number,'00123456')
+
+    def test_narrow_band_failure_restores_original_header(self):
+        for first in ([],[TextBox('Invoice No:',(.6,.2,.98,.24))]):
+            reader=InvoiceReader(single_invoice=True)
+            with patch.object(reader,'engine') as engine,patch.object(reader,'ocr_boxes',side_effect=[first,self.boxes]) as ocr:
+                engine.return_value.return_value=(self.detector,[.1])
+                row=reader.recognize_image(Image.new('RGB',(2400,1600)))[0]
+            self.assertEqual(ocr.call_count,2)
+            self.assertEqual(ocr.call_args.args[0].size,(2400,640))
+            self.assertEqual(row.invoice_code,'3100214130')
+            self.assertAlmostEqual(row.bbox[1],.08)
+
+    def test_complete_but_unreliable_narrow_number_goes_directly_to_full_page(self):
+        for first in ([TextBox('Invoice No: 00123456',(.6,.2,.98,.24),.9)],
+                      [TextBox('Invoice No: 00123456',(.6,.2,.98,.24))]):
+            reader=InvoiceReader(single_invoice=True)
+            with patch.object(reader,'engine') as engine,patch.object(reader,'ocr_boxes',side_effect=[first,self.boxes]) as ocr:
+                engine.return_value.return_value=(self.detector,[.1])
+                row=reader.recognize_image(Image.new('RGB',(2400,1600)))[0]
+            self.assertEqual(ocr.call_count,2)
+            self.assertEqual(ocr.call_args.args[0].size,(2400,1600))
+            self.assertEqual(row.invoice_code,'3100214130')
+            self.assertAlmostEqual(row.bbox[1],.2)
+
+    def test_cancel_during_narrow_pass_skips_all_fallback_work(self):
+        reader=InvoiceReader(single_invoice=True)
+        def cancelled(image):
+            reader.stop.set()
+            return self.boxes
+        with patch.object(reader,'engine') as engine,patch.object(reader,'ocr_boxes',side_effect=cancelled) as ocr:
+            engine.return_value.return_value=(self.detector,[.1])
+            rows=reader.recognize_image(Image.new('RGB',(2400,1600)))
+        self.assertEqual(rows,[])
+        self.assertEqual(ocr.call_count,1)
+
 
 class ContentCacheTests(unittest.TestCase):
     def test_content_cache_remaps_source_and_isolated_from_manual_edits(self):

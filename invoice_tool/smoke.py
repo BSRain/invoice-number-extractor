@@ -134,10 +134,12 @@ def run_smoke(folder):
         assert app.rows[-1].invoice_number == '00123456'
         assert app.rows[-1].invoice_code == '3100214130'
         assert app.rows[-1].rotation == 90
-        # On this synthetic crop the label score is 0.945 (<0.96).
-        # Verify actual conservative fallback instead of accepting it for speed.
-        assert header_attempts == [None]
-        assert app.rows[-1].reason == '标签与号码位置匹配。'
+        # The narrower original-resolution crop now passes the same .96 gate.
+        # Verify the real fast path, not a cached result or a lowered threshold.
+        assert len(header_attempts) == 1
+        assert header_attempts[0] is not None
+        assert header_attempts[0][0].status == '已识别'
+        assert app.rows[-1].reason.startswith('快速模式：号码区域高清识别。')
         app.reader.fast_header = previous_header
         assert app.reader.cache_hits == 1
         app.tree.selection_set('1')
@@ -155,7 +157,7 @@ def run_smoke(folder):
                   'GUI background processing','manual correction','unsaved edit protection',
                   'duplicate marking','Excel text values','all-record Excel summary',
                   'OCR model reuse across batches','content cache for copied files',
-                  'fast-mode low-confidence fallback and rotated preview'],
+                  'fast-mode narrow-band recognition and rotated preview'],
                   'records':[asdict(r) for r in app.rows]}
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0
