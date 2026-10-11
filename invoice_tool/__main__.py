@@ -13,7 +13,7 @@ def main(argv=None):
     parser.add_argument('--report',help='可选 JSON 明细输出路径')
     parser.add_argument('--overwrite',action='store_true',help='允许替换已有输出文件')
     parser.add_argument('--single-invoice',action='store_true',help='快速模式：输入每页只有一张发票，疑难票回退整页')
-    parser.add_argument('--workers',type=int,choices=(1,2),default=1,help='同时处理文件数：1（默认）或 2')
+    parser.add_argument('--workers',type=int,choices=(1,2),default=1,help='处理进程：1（默认）或 2；单份多页 PDF 按页并行')
     parser.add_argument('--smoke-test',metavar='DIRECTORY',help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.smoke_test:
@@ -43,7 +43,7 @@ def main(argv=None):
             rows.append(row)
             if sys.stdout:
                 print(f'{Path(row.source).name} / {row.page}: {row.invoice_number or "—"} [{row.status}]',flush=True)
-        if args.workers == 2 and len(files) > 1:
+        if args.workers == 2 and (len(files)>1 or files[0].suffix.lower() == '.pdf'):
             from invoice_tool.pipeline import ParallelReader
             with ParallelReader() as pool:
                 for kind,value in pool.read(files,single_invoice=args.single_invoice):

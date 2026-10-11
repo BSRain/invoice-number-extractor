@@ -187,12 +187,56 @@ def run_smoke(folder):
         assert app.parallel_reader.cache_hits == hits_before+2
         assert len(app.rows) == 10
         assert all(r.invoice_number == '00123456' for r in app.rows[-2:])
+        # One mixed multi-page PDF: original page numbers, native text, real
+        # rotated OCR in each process, then actual range-cache reuse for a copy.
+        mixed_pdf = folder/'单份多页并行.pdf'
+        with fitz.open() as doc:
+            for index in range(4):
+                if index%2 == 0:
+                    page = doc.new_page(width=800,height=500)
+                    page.insert_text((370,85),'Invoice No: 26000000000000000001',fontsize=16)
+                else:
+                    page = doc.new_page(width=500,height=800)
+                    page.insert_image(page.rect,filename=str(second))
+            doc.save(mixed_pdf)
+        app.import_paths([mixed_pdf])
+        deadline = time.monotonic()+120
+        while app.busy and time.monotonic()<deadline:
+            root.update()
+            time.sleep(.03)
+        root.update()
+        assert not app.busy
+        assert app.parallel_reader.pids == worker_pids
+        assert len(app.rows) == 14
+        page_rows = app.rows[-4:]
+        assert [r.page for r in page_rows] == [1,2,3,4]
+        assert [r.invoice_number for r in page_rows] == ['26000000000000000001','00123456']*2
+        assert [r.method for r in page_rows] == ['pdf','ocr']*2
+        assert [r.rotation for r in page_rows] == [0,90]*2
+        assert [r.duplicate_of for r in page_rows] == ['1','2']*2
+        assert str(mixed_pdf).casefold() in app.paths_seen
+        assert app.progress['maximum'] == 2
+        assert app.progress['value'] == 2
+        mixed_copy = folder/'多页并行副本.pdf'
+        mixed_copy.write_bytes(mixed_pdf.read_bytes())
+        hits_before = app.parallel_reader.cache_hits
+        app.import_paths([mixed_copy])
+        deadline = time.monotonic()+120
+        while app.busy and time.monotonic()<deadline:
+            root.update()
+            time.sleep(.03)
+        root.update()
+        assert not app.busy
+        assert len(app.rows) == 18
+        assert app.parallel_reader.cache_hits == hits_before+2
+        assert [r.source for r in app.rows[-4:]] == [str(mixed_copy)]*4
+        assert [r.page for r in app.rows[-4:]] == [1,2,3,4]
         from .core import export_excel
         export_excel(app.rows,exported)
         book = load_workbook(exported)
-        assert all(sheet.max_row == 11 for sheet in book)
-        assert book.active['B11'].value == '00123456'
-        assert book.active['B11'].data_type == 's'
+        assert all(sheet.max_row == 19 for sheet in book)
+        assert book.active['B19'].value == '00123456'
+        assert book.active['B19'].data_type == 's'
         book.close()
         app.tree.selection_set('1')
         app.tree.focus('1')
@@ -222,7 +266,9 @@ def run_smoke(folder):
                   'OCR model reuse across batches','content cache for copied files',
                   'fast-mode reused detection with one detector call and rotated preview',
                   'two real OCR processes, ordered results, reuse and all-row Excel',
-                  'reordered copies hit actual worker caches across batches'],
+                  'reordered copies hit actual worker caches across batches',
+                  'single mixed PDF page-parallel OCR, original page order and range cache',
+                  'page progress and whole-file completion; 18 rows in both Excel sheets'],
                   'records':[asdict(r) for r in app.rows]}
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0

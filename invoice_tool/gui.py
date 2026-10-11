@@ -84,9 +84,9 @@ class InvoiceApp:
                   foreground=MUTED).pack(side='left',padx=16)
         parallel_options = ttk.Frame(self.root,padding=(20,0,20,4))
         parallel_options.pack(fill='x')
-        self.parallel_check = ttk.Checkbutton(parallel_options,text='并行处理（同时识别两个文件）',variable=self.parallel)
+        self.parallel_check = ttk.Checkbutton(parallel_options,text='并行处理（两个任务，单份 PDF 按页）',variable=self.parallel)
         self.parallel_check.pack(side='left')
-        ttk.Label(parallel_options,text='适合多份扫描件；首次加载两个模型会增加耗时和内存。',
+        ttk.Label(parallel_options,text='适合多页或多份扫描件；首次加载两个模型会增加耗时和内存。',
                   foreground=MUTED).pack(side='left',padx=16)
         panes = ttk.Panedwindow(self.root,orient='horizontal')
         panes.pack(fill='both',expand=True,padx=20,pady=8)
@@ -172,7 +172,7 @@ class InvoiceApp:
         self.stop = Event()
         self.reader.stop = self.stop
         self.reader.single_invoice = self.single_invoice.get()
-        parallel = self.parallel.get() and len(files) > 1
+        parallel = self.parallel.get() and (len(files)>1 or files[0].suffix.lower() == '.pdf')
         single_invoice = self.single_invoice.get()
         self.set_busy(True)
         self.progress.configure(maximum=len(files),value=0)
@@ -221,7 +221,7 @@ class InvoiceApp:
                     new_rows.append(data)
                 elif kind == 'progress':
                     index,count,name = data
-                    self.progress.configure(value=index)
+                    self.progress.configure(maximum=count,value=index)
                     self.progress_text.set(f'正在处理 {index+1}/{count}：{name}')
                 elif kind == 'done':
                     self.paths_seen.update(data)

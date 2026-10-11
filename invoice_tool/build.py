@@ -73,7 +73,7 @@ def main():
         'RapidOCR / bundled OCR models: https://github.com/RapidAI/RapidOCR\n',encoding='utf-8')
     shutil.copy2(SOURCE/'README.md',output/'使用说明.md')
     (output/'请先阅读.txt').write_text(
-        '发票号码提取工具 1.6.0\n\n'
+        '发票号码提取工具 1.7.0\n\n'
         '完整解压后双击 InvoiceReader.exe，保留旁边的 _internal 文件夹。\n'
         'RAR/ZIP 发票包请先解压，再将文件夹拖入窗口。\n'
         '在本机离线识别 PDF、图片和文字；核对号码后导出 Excel。\n'
@@ -84,7 +84,7 @@ def main():
     if len(manifest) < 3:
         raise RuntimeError('The package is missing offline OCR models.')
     (output/'OCR_MODEL_CHECKSUMS.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
-    archive = release/'发票号码提取工具-1.6.0-Windows.zip'
+    archive = release/'发票号码提取工具-1.7.0-Windows.zip'
     with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as bundle:
         for path in sorted(output.rglob('*')):
             if path.is_file():

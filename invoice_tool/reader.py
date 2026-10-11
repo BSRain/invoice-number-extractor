@@ -325,18 +325,32 @@ class InvoiceReader:
 
     def read(self, raw_path):
         """Bounded in-memory content cache; edits and modes get different keys."""
+        yield from self._read_cached(raw_path)
+
+    def read_pdf_pages(self, raw_path, start, end):
+        """Read a zero-based, end-exclusive range, retaining original page numbers."""
+        if Path(raw_path).suffix.lower() != '.pdf' or not (0 <= start < end):
+            raise ValueError('PDF 页范围无效。')
+        yield from self._read_cached(raw_path,(start,end))
+
+    def _read_cached(self, raw_path, page_range=None):
         if self.stop.is_set():
             return
         path = Path(raw_path).resolve()
+        def uncached():
+            return (self._read_uncached(path,page_range) if page_range is not None
+                    else self._read_uncached(path))
         if path.suffix.lower() not in SUPPORTED:
-            yield from self._read_uncached(path)
+            yield from uncached()
             return
         try:
             key = (path.suffix.lower(),self.fingerprint(path,self.stop),self.single_invoice)
+            if page_range is not None:
+                key += (page_range,)
         except InterruptedError:
             return
         except OSError:
-            yield from self._read_uncached(path)
+            yield from uncached()
             return
         if key in self._cache:
             self._cache.move_to_end(key)
@@ -350,7 +364,7 @@ class InvoiceReader:
             return
         saved = []
         cacheable = True
-        for row in self._read_uncached(path):
+        for row in uncached():
             # Copy before yielding: GUI edits must never alter cached OCR data.
             if cacheable and len(saved) == self.cache_records:
                 saved.clear()
@@ -372,7 +386,7 @@ class InvoiceReader:
                or sum(len(rows) for rows in self._cache.values()) > self.cache_records):
             self._cache.popitem(last=False)
 
-    def _read_uncached(self, raw_path):
+    def _read_uncached(self, raw_path, page_range=None):
         import pymupdf as fitz
         from PIL import Image
         path = Path(raw_path).resolve()
@@ -394,10 +408,12 @@ class InvoiceReader:
                 with fitz.open(path) as doc:
                     if doc.needs_pass:
                         raise ValueError('PDF 有密码，请先解锁后导入。')
-                    for index,page in enumerate(doc):
+                    start,end = page_range or (0,len(doc))
+                    for index in range(start,end):
                         if self.stop.is_set():
                             break
                         try:
+                            page = doc[index]
                             rows = extract_invoices(self.native_boxes(page),'pdf')
                             if not all(r.status == '已识别' for r in rows):
                                 native_rows = rows
@@ -425,7 +441,7 @@ class InvoiceReader:
             else:
                 raise ValueError('不支持此文件类型；RAR/ZIP 请先解压再导入文件夹。')
         except Exception as exc:
-            yield self.failure(path,1,exc)
+            yield self.failure(path,page_range[0]+1 if page_range else 1,exc)
 
     @staticmethod
     def failure(path,page,exc):
