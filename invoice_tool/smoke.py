@@ -173,7 +173,8 @@ def run_smoke(folder):
         worker_pids = app.parallel_reader.pids
         assert len(set(worker_pids)) == 2
         next_files = [folder/f'并行第二批{i}.png' for i in range(2)]
-        for source,target in zip(parallel_files,next_files):
+        hits_before = app.parallel_reader.cache_hits
+        for source,target in zip(parallel_files[::-1],next_files):
             target.write_bytes(source.read_bytes())
         app.import_paths(next_files)
         deadline = time.monotonic()+120
@@ -183,6 +184,7 @@ def run_smoke(folder):
         root.update()
         assert not app.busy
         assert app.parallel_reader.pids == worker_pids
+        assert app.parallel_reader.cache_hits == hits_before+2
         assert len(app.rows) == 10
         assert all(r.invoice_number == '00123456' for r in app.rows[-2:])
         from .core import export_excel
@@ -219,7 +221,8 @@ def run_smoke(folder):
                   'duplicate marking','Excel text values','all-record Excel summary',
                   'OCR model reuse across batches','content cache for copied files',
                   'fast-mode reused detection with one detector call and rotated preview',
-                  'two real OCR processes, ordered results, reuse and all-row Excel'],
+                  'two real OCR processes, ordered results, reuse and all-row Excel',
+                  'reordered copies hit actual worker caches across batches'],
                   'records':[asdict(r) for r in app.rows]}
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0
