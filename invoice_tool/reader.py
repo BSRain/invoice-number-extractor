@@ -138,6 +138,7 @@ class InvoiceReader:
         Empty, ambiguous, low-score or incomplete traditional fields fall back
         to the standard full-page reader. Coordinates remain full-page based.
         """
+        import cv2
         import numpy as np
         polygons, _ = self.engine()(np.asarray(image),use_cls=False,use_rec=False)
         if self.stop.is_set() or not polygons:
@@ -151,6 +152,20 @@ class InvoiceReader:
         angle = 90 if vertical > horizontal else 0
         oriented = image.rotate(angle,expand=True) if angle else image
         width,height = oriented.size
+        # RapidOCR 1.4.4 components share the already loaded models. Only this
+        # adapter uses the pinned component API; failure preserves the old path.
+        try:
+            limit = .25 if width > FAST_BAND_MIN_WIDTH else .4
+            reused = self.recognize_detected_boxes(oriented,polygons,angle,limit)
+            rows = self.accept_header(reused,angle,'复用检测框')
+            if rows is not None or self.stop.is_set():
+                return rows
+            incomplete = extract_invoices(reused,'ocr')
+            if (any(NUMBER_LABEL.search(normalize(b.text)) for b in reused)
+                    and len(incomplete) == 1 and incomplete[0].invoice_number):
+                return None
+        except (AttributeError,TypeError,ValueError,RuntimeError,cv2.error):
+            pass
         bottom = max(1,int(height*.4))
         header = oriented.crop((0,0,width,bottom))
         if width > FAST_BAND_MIN_WIDTH:
@@ -170,6 +185,69 @@ class InvoiceReader:
                 return None
         boxes = self.header_boxes(header,0,bottom,height)
         return self.accept_header(boxes,angle,'票头识别')
+
+    def recognize_detected_boxes(self,image,polygons,angle,limit):
+        """Recognize original-resolution header crops without another detector.
+
+        Polygon coordinates from RapidOCR are in the original page space.
+        Map them to the same upright space as the preview before cropping.
+        Keep classification and its 180-degree correction; never guess digits.
+        """
+        import numpy as np
+        if self.stop.is_set():
+            return []
+        width,height = image.size
+        selected = []
+        for raw in polygons:
+            points = np.asarray(raw,dtype=np.float32)
+            if points.shape != (4,2) or not np.isfinite(points).all():
+                raise ValueError('Invalid detected text polygon')
+            if angle == 90:
+                points = np.column_stack((points[:,1],height-points[:,0]))[[1,2,3,0]]
+            elif angle != 0:
+                raise ValueError('Unsupported detection rotation')
+            x0,y0 = points.min(axis=0)
+            x1,y1 = points.max(axis=0)
+            if x0 < 0 or y0 < 0 or x1 > width or y1 > height or x1-x0 < 1 or y1-y0 < 1:
+                raise ValueError('Detected text polygon out of page bounds')
+            if y1 <= int(height*limit):
+                selected.append(points)
+        if not selected:
+            return []
+        if len(selected) > 128:
+            raise ValueError('Too many header text polygons')
+        engine = self.engine()
+        crops = engine.get_crop_img_list(np.asarray(image),selected)
+        if len(crops) != len(selected):
+            raise ValueError('Text crop count mismatch')
+        if self.stop.is_set():
+            return []
+        classified = engine.text_cls(crops)
+        if not isinstance(classified,tuple) or len(classified) != 3:
+            raise ValueError('Unsupported classification component result')
+        crops,_,_ = classified
+        if len(crops) != len(selected):
+            raise ValueError('Classification count mismatch')
+        if self.stop.is_set():
+            return []
+        recognized = engine.text_rec(crops)
+        if not isinstance(recognized,tuple) or len(recognized) != 2:
+            raise ValueError('Unsupported recognition component result')
+        values,_ = recognized
+        if len(values) != len(selected):
+            raise ValueError('Recognition count mismatch')
+        boxes = []
+        for points,(text,score) in zip(selected,values):
+            score = float(score)
+            if not isinstance(text,str) or not math.isfinite(score) or not 0 <= score <= 1:
+                raise ValueError('Invalid text recognition result')
+            if score < .5:
+                continue
+            x0,y0 = points.min(axis=0)
+            x1,y1 = points.max(axis=0)
+            boxes.append(TextBox(text,(float(x0/width),float(y0/height),
+                                       float(x1/width),float(y1/height)),score))
+        return [] if self.stop.is_set() else boxes
 
     def header_boxes(self,image,top,bottom,page_height):
         return [TextBox(b.text,(b.bbox[0],(top+b.bbox[1]*(bottom-top))/page_height,

@@ -122,6 +122,12 @@ def run_smoke(folder):
             header_attempts.append(result)
             return result
         app.reader.fast_header = checked_header
+        previous_detector = engine.text_det
+        detection_calls = []
+        def counted_detector(image):
+            detection_calls.append(1)
+            return previous_detector(image)
+        engine.text_det = counted_detector
         app.import_paths([fast_file])
         assert str(app.fast_check['state']) == 'disabled'
         deadline = time.monotonic()+120
@@ -129,6 +135,7 @@ def run_smoke(folder):
             root.update()
             time.sleep(.03)
         root.update()
+        engine.text_det = previous_detector
         assert not app.busy
         assert len(app.rows) == 6
         assert app.rows[-1].invoice_number == '00123456'
@@ -139,7 +146,8 @@ def run_smoke(folder):
         assert len(header_attempts) == 1
         assert header_attempts[0] is not None
         assert header_attempts[0][0].status == '已识别'
-        assert app.rows[-1].reason.startswith('快速模式：号码区域高清识别。')
+        assert app.rows[-1].reason.startswith('快速模式：复用检测框。')
+        assert len(detection_calls) == 1
         app.reader.fast_header = previous_header
         assert app.reader.cache_hits == 1
         app.tree.selection_set('1')
@@ -168,7 +176,7 @@ def run_smoke(folder):
                   'GUI background processing','manual correction','unsaved edit protection',
                   'duplicate marking','Excel text values','all-record Excel summary',
                   'OCR model reuse across batches','content cache for copied files',
-                  'fast-mode narrow-band recognition and rotated preview'],
+                  'fast-mode reused detection with one detector call and rotated preview'],
                   'records':[asdict(r) for r in app.rows]}
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0
