@@ -7,7 +7,7 @@ import sys
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='本地批量提取 PDF/图片/文字中的发票号码')
+    parser = argparse.ArgumentParser(description='本地批量提取 PDF/图片/文字中的发票号码和价税合计')
     parser.add_argument('--input',nargs='+',help='文件或文件夹（可多个）')
     parser.add_argument('--output',help='Excel 输出路径（.xlsx）')
     parser.add_argument('--report',help='可选 JSON 明细输出路径')
@@ -42,7 +42,8 @@ def main(argv=None):
         def consume(row):
             rows.append(row)
             if sys.stdout:
-                print(f'{Path(row.source).name} / {row.page}: {row.invoice_number or "—"} [{row.status}]',flush=True)
+                print(f'{Path(row.source).name} / {row.page}: {row.invoice_number or "—"} [{row.status}] '
+                      f'价税合计：{row.amount or "—"} [{row.amount_status}]',flush=True)
         if args.workers == 2 and (len(files)>1 or files[0].suffix.lower() == '.pdf'):
             from invoice_tool.pipeline import ParallelReader
             with ParallelReader() as pool:

@@ -1,6 +1,7 @@
 """Conservative, position-aware invoice rules, independent of OCR libraries."""
 from dataclasses import dataclass, field
 from pathlib import Path
+from .amounts import attach_amounts, money
 import re
 import unicodedata
 
@@ -49,6 +50,11 @@ class InvoiceRecord:
     rotation: int = 0
     duplicate_of: str = ''
     evidence: str = ''
+    amount: str = ''
+    amount_status: str = '未识别'
+    amount_reason: str = '未找到可靠的价税合计（小写），请对照原件补录。'
+    amount_candidates: list[str] = field(default_factory=list)
+    amount_bbox: tuple[float, float, float, float] | None = None
 
 
 def nearby(label, value):
@@ -97,17 +103,17 @@ def extract_invoices(boxes, method='pdf'):
                                   reason='标签与号码位置匹配。' if accepted else
                                   'OCR 文字识别分数偏低，请核对完整号码。'))
     if rows:
-        return rows
+        return attach_amounts(rows, boxes, method)
     # Unlabelled digits remain review candidates; never trust a filename as evidence.
     fallback = [(b, n) for b, n in useful if b.bbox[1] < .35 and b.bbox[0] >= .45]
     candidates = list(dict.fromkeys(n for _, n in fallback))
-    return [InvoiceRecord(method=method, status='待复核' if candidates else '未识别',
+    return attach_amounts([InvoiceRecord(method=method, status='待复核' if candidates else '未识别',
                           candidates=candidates,
                           invoice_number=candidates[0] if len(candidates) == 1 else '',
                           bbox=fallback[0][0].bbox if fallback else None,
                           evidence='\n'.join(b.text for b, _ in fallback),
                           reason='缺少可靠的号码标签，请对照原件确认。' if candidates else
-                          '未找到发票号码，请人工补录或换用更清晰的文件。')]
+                          '未找到发票号码，请人工补录或换用更清晰的文件。')], boxes, method)
 
 
 def find_code(boxes, number_label):
@@ -148,7 +154,7 @@ def mark_duplicates(rows):
                 seen[key] = index
 
 
-def confirm_record(row, number, code=''):
+def confirm_record(row, number, code='', amount=None):
     number = re.sub(r'\s+', '', normalize(number))
     code = re.sub(r'\s+', '', normalize(code))
     if not re.fullmatch(r'(?:[0-9]{8}|[0-9]{20})', number):
@@ -157,14 +163,19 @@ def confirm_record(row, number, code=''):
         raise ValueError('发票代码必须是 10 位或 12 位数字，也可留空。')
     if len(number) == 20 and code:
         raise ValueError('20 位数电票号码无需发票代码，请清空代码。')
+    parsed_amount = money(amount) if amount is not None and amount.strip() else ''
     row.invoice_number,row.invoice_code = number,code
     row.status = '已确认'
     row.reason = '人工核对并确认。'
     row.duplicate_of = ''
+    if amount is not None:
+        row.amount = parsed_amount
+        row.amount_status = '已确认' if parsed_amount else '未识别'
+        row.amount_reason = '人工核对并确认。' if parsed_amount else '金额留空，请对照原件补录。'
 
 
 def export_excel(rows, path):
-    """Export every row as explicit text, including unrecognized inputs."""
+    """Export every row, preserving number strings and reliable numeric amounts."""
     import os
     import tempfile
     from openpyxl import Workbook
@@ -177,7 +188,8 @@ def export_excel(rows, path):
     sheet = workbook.active
     sheet.title = '发票号码'
     headers = ['来源文件', '页码', '发票号码', '发票代码', '识别方式', '状态',
-               '重复于第几条', '说明', '候选号码', '来源路径']
+               '重复于第几条', '说明', '候选号码', '来源路径',
+               '价税合计（含税）', '金额状态', '金额说明', '候选金额']
     sheet.append(headers)
     for cell in sheet[1]:
         cell.font = Font(color='FFFFFF', bold=True)
@@ -198,10 +210,12 @@ def export_excel(rows, path):
         sheet.cell(sheet.max_row, 6).fill = PatternFill('solid', fgColor=color)
     for letter, width in zip('ABCDEFGHIJ', (38, 8, 28, 18, 14, 12, 16, 56, 48, 70)):
         sheet.column_dimensions[letter].width = width
+    _export_amounts(sheet, rows, 11)
     sheet.freeze_panes = 'A2'
     sheet.auto_filter.ref = sheet.dimensions
     summary = workbook.create_sheet('全部发票号',0)
-    summary.append(['序号','发票号码','发票代码','来源文件','页码','状态','重复于第几条','候选号码'])
+    summary.append(['序号','发票号码','发票代码','来源文件','页码','状态','重复于第几条','候选号码',
+                    '价税合计（含税）','金额状态','金额说明','候选金额'])
     for cell in summary[1]:
         cell.font = Font(color='FFFFFF',bold=True)
         cell.fill = PatternFill('solid',fgColor='18334D')
@@ -218,6 +232,7 @@ def export_excel(rows, path):
             summary.cell(summary.max_row,6).fill = PatternFill('solid',fgColor='FFF3D6')
     for letter,width in zip('ABCDEFGH',(8,28,18,38,8,12,16,48)):
         summary.column_dimensions[letter].width = width
+    _export_amounts(summary, rows, 9)
     summary.freeze_panes = 'A2'
     summary.auto_filter.ref = summary.dimensions
     workbook.active = 0
@@ -229,3 +244,24 @@ def export_excel(rows, path):
     finally:
         workbook.close()
         Path(temporary).unlink(missing_ok=True)
+
+
+def _export_amounts(sheet, rows, column):
+    from decimal import Decimal
+    from openpyxl.styles import Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+    for index, row in enumerate(rows, 2):
+        cell = sheet.cell(index, column)
+        if row.amount and row.amount_status in ('已识别', '已确认'):
+            cell.value = Decimal(row.amount)
+        cell.number_format = '0.00'
+        for offset, value in enumerate((row.amount_status, row.amount_reason,
+                                         ' / '.join(row.amount_candidates)), 1):
+            cell = sheet.cell(index, column+offset, str(value))
+            cell.data_type = 's'
+            cell.number_format = '@'
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+        if row.amount_status not in ('已识别', '已确认'):
+            sheet.cell(index, column+1).fill = PatternFill('solid', fgColor='FFF3D6')
+    for offset, width in enumerate((22, 12, 56, 40)):
+        sheet.column_dimensions[get_column_letter(column+offset)].width = width

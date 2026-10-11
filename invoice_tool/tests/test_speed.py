@@ -54,7 +54,8 @@ class FastModeTests(unittest.TestCase):
             engine.return_value.return_value=(vertical,[.1])
             row=reader.recognize_image(self.image)[0]
         self.assertEqual(row.rotation,90)
-        self.assertEqual(ocr.call_args.args[0].size,(700,400))
+        self.assertEqual(ocr.call_args_list[0].args[0].size,(700,400))
+        self.assertEqual(ocr.call_args_list[1].args[0].size,(700,650))
 
     def test_crop_failure_does_not_turn_readable_page_into_failure(self):
         reader=InvoiceReader(single_invoice=True)
@@ -73,19 +74,21 @@ class FastModeTests(unittest.TestCase):
         with patch.object(reader,'engine') as engine,patch.object(reader,'ocr_boxes',return_value=self.boxes) as ocr:
             engine.return_value.return_value=(self.detector,[.1])
             row=reader.recognize_image(Image.new('RGB',(2400,1600)))[0]
-        self.assertEqual(ocr.call_count,1)
-        self.assertEqual(ocr.call_args.args[0].size,(2400,400))
+        self.assertEqual(ocr.call_count,2)
+        self.assertEqual(ocr.call_args_list[0].args[0].size,(2400,400))
+        self.assertEqual(ocr.call_args_list[1].args[0].size,(2400,1040))
         self.assertAlmostEqual(row.bbox[1],.05)
         self.assertEqual(row.invoice_number,'00123456')
 
     def test_narrow_band_failure_restores_original_header(self):
         for first in ([],[TextBox('Invoice No:',(.6,.2,.98,.24))]):
             reader=InvoiceReader(single_invoice=True)
-            with patch.object(reader,'engine') as engine,patch.object(reader,'ocr_boxes',side_effect=[first,self.boxes]) as ocr:
+            with patch.object(reader,'engine') as engine,patch.object(reader,'ocr_boxes',side_effect=[first,self.boxes,[]]) as ocr:
                 engine.return_value.return_value=(self.detector,[.1])
                 row=reader.recognize_image(Image.new('RGB',(2400,1600)))[0]
-            self.assertEqual(ocr.call_count,2)
-            self.assertEqual(ocr.call_args.args[0].size,(2400,640))
+            self.assertEqual(ocr.call_count,3)
+            self.assertEqual(ocr.call_args_list[1].args[0].size,(2400,640))
+            self.assertEqual(ocr.call_args_list[2].args[0].size,(2400,1040))
             self.assertEqual(row.invoice_code,'3100214130')
             self.assertAlmostEqual(row.bbox[1],.08)
 

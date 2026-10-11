@@ -29,13 +29,14 @@ class InvoiceApp:
         self._render_timer = None
         self.number = tk.StringVar()
         self.code = tk.StringVar()
+        self.amount = tk.StringVar()
         self.single_invoice = tk.BooleanVar(value=False)
         self.parallel = tk.BooleanVar(value=False)
         self.caption = tk.StringVar(value='选择一条结果，查看原件并核对号码。')
         self.reason = tk.StringVar()
         self.summary = tk.StringVar(value='暂无结果')
         self.progress_text = tk.StringVar(value='拖入文件或文件夹，也可以点击“添加文件”。')
-        root.title('发票号码提取 · 本地版')
+        root.title('发票号码与金额提取 · 本地版')
         width = min(1360,max(980,root.winfo_screenwidth()-80))
         height = min(900,max(640,root.winfo_screenheight()-100))
         root.geometry(f'{width}x{height}+40+40')
@@ -60,7 +61,7 @@ class InvoiceApp:
         style.map('Treeview',background=[('selected','#D5E7F2')],foreground=[('selected',INK)])
         header = ttk.Frame(self.root,padding=(20,16,20,8))
         header.pack(fill='x')
-        ttk.Label(header,text='发票号码提取',font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
+        ttk.Label(header,text='发票号码与金额提取',font=('Microsoft YaHei UI',22,'bold')).pack(side='left')
         ttk.Label(header,text='PDF / 图片 / 文字  ·  本机离线处理',foreground=MUTED).pack(side='right')
         toolbar = ttk.Frame(self.root,padding=(20,8))
         toolbar.pack(fill='x')
@@ -99,8 +100,9 @@ class InvoiceApp:
         table.pack(fill='both',expand=True)
         table.rowconfigure(0,weight=1)
         table.columnconfigure(0,weight=1)
-        columns = [('file','来源文件',245),('page','页',45),('number','发票号码',205),
-                   ('state','状态',88),('duplicate','重复于',75)]
+        columns = [('file','来源文件',160),('page','页',35),('number','发票号码',205),
+                   ('amount','价税合计',105),('amount_state','金额状态',88),
+                   ('state','号码状态',88),('duplicate','重复于',75)]
         self.tree = ttk.Treeview(table,columns=[c[0] for c in columns],show='headings',selectmode='browse')
         for name,title,width in columns:
             self.tree.heading(name,text=title)
@@ -118,14 +120,14 @@ class InvoiceApp:
         self.tree.bind('<<TreeviewSelect>>',self.select)
         ttk.Label(left,textvariable=self.summary,foreground=MUTED).pack(anchor='w',pady=10)
         ttk.Label(right,text='原件与号码区域',font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w',pady=(0,8))
-        self.canvas = tk.Canvas(right,background='white',highlightthickness=1,highlightbackground='#D6DEE5',height=275)
+        self.canvas = tk.Canvas(right,background='white',highlightthickness=1,highlightbackground='#D6DEE5',height=120)
         self.canvas.pack(fill='both',expand=True)
         self.canvas.bind('<Configure>',self.schedule_render)
         caption_label = ttk.Label(right,textvariable=self.caption,wraplength=460,foreground=MUTED)
-        caption_label.pack(fill='x',pady=8)
+        caption_label.pack(fill='x',pady=4)
         self.crop_canvas = tk.Canvas(right,background='white',height=66,highlightthickness=1,highlightbackground='#D6DEE5')
         self.crop_canvas.pack(fill='x')
-        form = ttk.Frame(right,padding=(0,10))
+        form = ttk.Frame(right,padding=(0,4))
         form.pack(fill='x')
         form.columnconfigure(1,weight=1)
         ttk.Label(form,text='发票号码').grid(row=0,column=0,sticky='w',padx=(0,12),pady=4)
@@ -134,13 +136,18 @@ class InvoiceApp:
         ttk.Label(form,text='发票代码').grid(row=1,column=0,sticky='w',padx=(0,12),pady=4)
         ttk.Entry(form,textvariable=self.code,font=('Consolas',12)).grid(row=1,column=1,sticky='ew',pady=4)
         help_label = ttk.Label(form,text='传统发票可填写代码；20 位数电票留空。',foreground=MUTED,wraplength=460)
-        help_label.grid(row=2,column=0,columnspan=2,sticky='w',pady=4)
+        help_label.grid(row=2,column=0,columnspan=2,sticky='w',pady=2)
+        ttk.Label(form,text='价税合计').grid(row=3,column=0,sticky='w',padx=(0,12),pady=4)
+        self.amount_entry = ttk.Combobox(form,textvariable=self.amount,font=('Consolas',12))
+        self.amount_entry.grid(row=3,column=1,sticky='ew',pady=4)
+        ttk.Label(form,text='含税人民币金额；可填负数，未确定时留空。',foreground=MUTED).grid(
+            row=4,column=0,columnspan=2,sticky='w',pady=2)
         actions = ttk.Frame(right)
         actions.pack(fill='x')
         ttk.Button(actions,text='保存并确认',command=self.confirm,style='Primary.TButton').pack(side='left')
         ttk.Button(actions,text='下一条待复核',command=self.next_review).pack(side='right')
         reason_label = ttk.Label(right,textvariable=self.reason,wraplength=460,foreground=MUTED)
-        reason_label.pack(fill='x',pady=(8,0))
+        reason_label.pack(fill='x',pady=(4,0))
         right.bind('<Configure>',lambda event: [label.configure(wraplength=max(100,event.width-20))
                                                 for label in (caption_label,help_label,reason_label)])
         progress = ttk.Frame(self.root,padding=(20,4,20,12))
@@ -249,16 +256,17 @@ class InvoiceApp:
     def refresh(self):
         mark_duplicates(self.rows)
         for index,row in enumerate(self.rows):
-            values = (Path(row.source).name,row.page,row.invoice_number or '—',row.status,
+            values = (Path(row.source).name,row.page,row.invoice_number or '—',
+                      row.amount or '—',row.amount_status,row.status,
                       '第 '+row.duplicate_of+' 条' if row.duplicate_of else '')
             if self.tree.exists(str(index)):
                 self.tree.item(str(index),values=values,tags=(row.status,))
             else:
                 self.tree.insert('','end',iid=str(index),values=values,tags=(row.status,))
-        good = sum(r.status in ('已识别','已确认') for r in self.rows)
-        review = len(self.rows)-good
+        review = sum(r.status not in ('已识别','已确认') for r in self.rows)
         duplicates = sum(bool(r.duplicate_of) for r in self.rows)
-        self.summary.set(f'{len(self.rows)} 条结果  ·  已识别/确认 {good}  ·  待处理 {review}  ·  重复 {duplicates}')
+        amount_review = sum(r.amount_status not in ('已识别','已确认') for r in self.rows)
+        self.summary.set(f'{len(self.rows)} 条  ·  号码待处理 {review}  ·  金额待处理 {amount_review}  ·  重复 {duplicates}')
 
     def select(self, _=None):
         selected = self.tree.selection()
@@ -268,14 +276,14 @@ class InvoiceApp:
         if index == self.selected and self.form_changed():
             return
         if self.selected is not None and self.selected != index and self.form_changed():
-            choice = messagebox.askyesnocancel('修改尚未保存','保存当前号码修改并确认后，切换到下一条？',parent=self.root)
+            choice = messagebox.askyesnocancel('修改尚未保存','保存当前号码及金额修改并确认后，切换到下一条？',parent=self.root)
             if choice is True:
                 try:
-                    confirm_record(self.rows[self.selected],self.number.get(),self.code.get())
+                    confirm_record(self.rows[self.selected],self.number.get(),self.code.get(),self.amount.get())
                     self.dirty = True
                     self.refresh()
                 except ValueError as exc:
-                    messagebox.showerror('号码格式不正确',str(exc),parent=self.root)
+                    messagebox.showerror('字段格式不正确',str(exc),parent=self.root)
                     choice = None
             if choice is None:
                 self.tree.selection_set(str(self.selected))
@@ -284,14 +292,16 @@ class InvoiceApp:
         row = self.rows[self.selected]
         self.number.set(row.invoice_number)
         self.code.set(row.invoice_code)
+        self.amount.set(row.amount)
+        self.amount_entry.configure(values=row.amount_candidates)
         self.number_entry.configure(values=row.candidates)
-        self.reason.set(row.reason)
+        self.reason.set(row.reason+'\n金额：'+row.amount_reason)
         self.caption.set(f'{Path(row.source).name}  ·  第 {row.page} 页')
         try:
             self.preview = preview_image(row)
         except Exception as exc:
             self.preview = None
-            self.reason.set(row.reason+'\n无法预览：'+str(exc))
+            self.reason.set(row.reason+'\n金额：'+row.amount_reason+'\n无法预览：'+str(exc))
         self.render()
 
     def schedule_render(self, _=None):
@@ -314,6 +324,11 @@ class InvoiceApp:
         image = self.preview.copy()
         row = self.rows[self.selected]
         bounds = None
+        if row.amount_bbox:
+            w,h = image.size
+            x0,y0,x1,y1 = row.amount_bbox
+            ImageDraw.Draw(image).rectangle((int(x0*w),int(y0*h),int(x1*w),int(y1*h)),
+                                            outline=ACCENT,width=3)
         if row.bbox:
             w,h = image.size
             x0,y0,x1,y1 = row.bbox
@@ -333,13 +348,14 @@ class InvoiceApp:
         if self.selected is None:
             return
         try:
-            confirm_record(self.rows[self.selected],self.number.get(),self.code.get())
+            confirm_record(self.rows[self.selected],self.number.get(),self.code.get(),self.amount.get())
         except ValueError as exc:
-            messagebox.showerror('号码格式不正确',str(exc),parent=self.root)
+            messagebox.showerror('字段格式不正确',str(exc),parent=self.root)
             return
         self.dirty = True
         self.number.set(self.rows[self.selected].invoice_number)
         self.code.set(self.rows[self.selected].invoice_code)
+        self.amount.set(self.rows[self.selected].amount)
         self.refresh()
         self.select()
 
@@ -347,7 +363,8 @@ class InvoiceApp:
         start = self.selected+1 if self.selected is not None else 0
         order = list(range(start,len(self.rows)))+list(range(start))
         for index in order:
-            if self.rows[index].status not in ('已识别','已确认'):
+            if (self.rows[index].status not in ('已识别','已确认') or
+                    self.rows[index].amount_status not in ('已识别','已确认')):
                 self.tree.selection_set(str(index))
                 self.tree.focus(str(index))
                 self.tree.see(str(index))
@@ -409,6 +426,7 @@ class InvoiceApp:
         self.dirty = False
         self.number.set('')
         self.code.set('')
+        self.amount.set('')
         self.reason.set('')
         self.caption.set('选择一条结果，查看原件并核对号码。')
         self.progress.configure(value=0)
@@ -428,7 +446,8 @@ class InvoiceApp:
         if self.selected is None:
             return False
         row = self.rows[self.selected]
-        return (self.number.get(),self.code.get()) != (row.invoice_number,row.invoice_code)
+        return (self.number.get(),self.code.get(),self.amount.get()) != (
+            row.invoice_number,row.invoice_code,row.amount)
 
 
 def create_app():

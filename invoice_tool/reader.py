@@ -9,6 +9,7 @@ import re
 from threading import Event
 
 from .core import NUMBER_LABEL, InvoiceRecord, TextBox, extract_invoices, normalize, numbers
+from .amounts import attach_amounts
 
 SUPPORTED = {'.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.txt'}
 MAX_DECODE_PIXELS = 30_000_000
@@ -280,6 +281,9 @@ class InvoiceReader:
             except (ValueError,RuntimeError):
                 rows = None
             if rows is not None:
+                self.read_amount_image(rows, image)
+                if self.stop.is_set():
+                    return []
                 return rows
         best_rows = []
         best_rank = (-1,-1,-1,-1,-1)
@@ -312,6 +316,23 @@ class InvoiceReader:
                                               and all(r.invoice_number for r in rows))):
                 break
         return best_rows
+
+    def read_amount_image(self, rows, image):
+        """A successful single-invoice header still needs its gross-total region."""
+        if self.stop.is_set():
+            return
+        angle = rows[0].rotation
+        oriented = image.rotate(angle, expand=True) if angle else image
+        width, height = oriented.size
+        top = int(height*.35)
+        try:
+            boxes = self.header_boxes(oriented.crop((0, top, width, height)), top, height, height)
+            attach_amounts(rows, boxes, 'ocr')
+        except Exception as exc:
+            for row in rows:
+                row.amount = ''
+                row.amount_status = '未识别'
+                row.amount_reason = '金额区域读取失败，请人工补录：'+type(exc).__name__
 
     @staticmethod
     def fingerprint(path, stop=None):
@@ -419,7 +440,8 @@ class InvoiceReader:
                                 native_rows = rows
                                 rows = self.recognize_image(page_image(page))
                                 if rows and not any(r.invoice_number or r.candidates for r in rows):
-                                    if any(r.invoice_number or r.candidates for r in native_rows):
+                                    if any(r.invoice_number or r.candidates or r.amount or r.amount_candidates
+                                           for r in native_rows):
                                         rows = native_rows
                             for row in rows:
                                 row.source,row.page = str(path),index+1

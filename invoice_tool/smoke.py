@@ -22,6 +22,7 @@ def run_smoke(folder):
             page.insert_text((485,85),'Invoice No: 00123456',fontsize=20)
             for i in range(5):
                 page.insert_text((65,170+i*40),'Invoice item description and quantity',fontsize=18)
+            page.insert_text((400,430),'Total incl. tax: CNY 113.00',fontsize=20)
             pix = page.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False)
             image = Image.frombytes('RGB',(pix.width,pix.height),pix.samples).rotate(270,expand=True)
             image.save(folder/'旋转扫描件.png')
@@ -30,6 +31,7 @@ def run_smoke(folder):
             page = doc.new_page(width=800,height=500)
             page.insert_text((260,45),'ELECTRONIC INVOICE',fontsize=22)
             page.insert_text((370,85),'Invoice No: 26000000000000000001',fontsize=16)
+            page.insert_text((400,430),'Total incl. tax: CNY 950.00',fontsize=16)
             doc.save(pdf)
         root,app = create_app()
         root.attributes('-topmost',True)
@@ -46,16 +48,25 @@ def run_smoke(folder):
         assert app.rows[1].invoice_number == '00123456'
         assert app.rows[1].invoice_code == '3100214130'
         assert app.rows[1].rotation == 90
+        assert [(r.amount,r.amount_status) for r in app.rows] == [('950.00','已识别'),('113.00','已识别')]
         app.add_rows(parse_text('发票号码：00123456\n发票代码：3100214130'))
         app.add_rows(parse_text('00000001'))
         assert app.rows[2].duplicate_of == '2'
+        app.tree.selection_set('0')
+        root.update()
+        app.next_review()
+        root.update()
+        assert app.selected == 2  # Number accepted, amount missing.
         app.tree.selection_set('3')
         root.update()
         app.number.set('00000002')
         app.code.set('3100214130')
+        app.amount.set('-123.45')
         app.confirm()
         assert app.rows[3].invoice_number == '00000002'
         assert app.rows[3].status == '已确认'
+        assert (app.rows[3].amount,app.rows[3].amount_status) == ('-123.45','已确认')
+        assert not app.form_changed()
         exported = folder/'验证结果.xlsx'
         previous = filedialog.asksaveasfilename
         filedialog.asksaveasfilename = lambda **kwargs: str(exported)
@@ -73,7 +84,30 @@ def run_smoke(folder):
             assert book.active.title == '全部发票号'
             assert book.active['B2'].value == '26000000000000000001'
             assert book.active.max_row == len(app.rows)+1
+            assert book.active['I5'].value == -123.45
+            assert book.active['I5'].data_type == 'n'
+            assert sheet['K2'].value == 950
             book.close()
+        # Amount-only edits must be guarded by both row switching and export.
+        app.amount.set('-999.01')
+        prompt = messagebox.askyesnocancel
+        notice = messagebox.showinfo
+        save_dialog = filedialog.asksaveasfilename
+        notices = []
+        messagebox.askyesnocancel = lambda *args,**kwargs: None
+        messagebox.showinfo = lambda *args,**kwargs: notices.append(args[0])
+        filedialog.asksaveasfilename = lambda **kwargs: (_ for _ in ()).throw(AssertionError('unsaved export'))
+        try:
+            app.tree.selection_set('1')
+            root.update()
+            assert app.selected == 3 and app.amount.get() == '-999.01'
+            app.export()
+            assert notices == ['修改尚未保存']
+        finally:
+            messagebox.askyesnocancel = prompt
+            messagebox.showinfo = notice
+            filedialog.asksaveasfilename = save_dialog
+        app.amount.set('-123.45')
         # Switching rows must preserve an unconfirmed edit when the user cancels.
         app.number.set('00000003')
         previous_prompt = messagebox.askyesnocancel
@@ -147,7 +181,8 @@ def run_smoke(folder):
         assert header_attempts[0] is not None
         assert header_attempts[0][0].status == '已识别'
         assert app.rows[-1].reason.startswith('快速模式：复用检测框。')
-        assert len(detection_calls) == 1
+        assert len(detection_calls) == 2  # Header detection plus the new amount region.
+        assert app.rows[-1].amount == '113.00'
         app.reader.fast_header = previous_header
         assert app.reader.cache_hits == 1
         # Real independent OCR workers, ordered duplicates, and process reuse.
@@ -195,6 +230,7 @@ def run_smoke(folder):
                 if index%2 == 0:
                     page = doc.new_page(width=800,height=500)
                     page.insert_text((370,85),'Invoice No: 26000000000000000001',fontsize=16)
+                    page.insert_text((400,430),'Total incl. tax: CNY 950.00',fontsize=16)
                 else:
                     page = doc.new_page(width=500,height=800)
                     page.insert_image(page.rect,filename=str(second))
@@ -214,6 +250,7 @@ def run_smoke(folder):
         assert [r.method for r in page_rows] == ['pdf','ocr']*2
         assert [r.rotation for r in page_rows] == [0,90]*2
         assert [r.duplicate_of for r in page_rows] == ['1','2']*2
+        assert [r.amount for r in page_rows] == ['950.00','113.00']*2
         assert str(mixed_pdf).casefold() in app.paths_seen
         assert app.progress['maximum'] == 2
         assert app.progress['value'] == 2
@@ -231,6 +268,7 @@ def run_smoke(folder):
         assert app.parallel_reader.cache_hits == hits_before+2
         assert [r.source for r in app.rows[-4:]] == [str(mixed_copy)]*4
         assert [r.page for r in app.rows[-4:]] == [1,2,3,4]
+        assert [r.amount for r in app.rows[-4:]] == ['950.00','113.00']*2
         from .core import export_excel
         export_excel(app.rows,exported)
         book = load_workbook(exported)
@@ -264,7 +302,8 @@ def run_smoke(folder):
                   'GUI background processing','manual correction','unsaved edit protection',
                   'duplicate marking','Excel text values','all-record Excel summary',
                   'OCR model reuse across batches','content cache for copied files',
-                  'fast-mode reused detection with one detector call and rotated preview',
+                  'fast-mode header reuse plus gross-total OCR and rotated preview',
+                  'independent amount status, manual negative correction, numeric Excel totals',
                   'two real OCR processes, ordered results, reuse and all-row Excel',
                   'reordered copies hit actual worker caches across batches',
                   'single mixed PDF page-parallel OCR, original page order and range cache',
