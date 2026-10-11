@@ -13,6 +13,7 @@ def run_smoke(folder):
         import pymupdf as fitz
         from PIL import Image, ImageGrab
         from openpyxl import load_workbook
+        from unittest.mock import patch
         from .gui import create_app, filedialog, messagebox
         from .reader import parse_text
         with fitz.open() as raster:
@@ -49,6 +50,25 @@ def run_smoke(folder):
         assert app.rows[1].invoice_code == '3100214130'
         assert app.rows[1].rotation == 90
         assert [(r.amount,r.amount_status) for r in app.rows] == [('950.00','已识别'),('113.00','已识别')]
+        # Exercise actual Tk click bindings; intercept only the Windows viewer
+        # boundary so the opt-in smoke test doesn't launch external programs.
+        for index in (0,1):
+            app.tree.selection_set(str(index))
+            root.update()
+            app.render()
+            assert app.canvas.cget('cursor') == 'hand2'
+            assert app.crop_canvas.cget('cursor') == 'hand2'
+            app.amount.set('999.99')
+            before = asdict(app.rows[index])
+            with patch('invoice_tool.gui.os.startfile') as launch:
+                for canvas in (app.canvas,app.crop_canvas):
+                    canvas.event_generate('<Button-1>',x=20,y=20)
+                    root.update()
+                assert launch.call_count == 2
+                assert all(call.args == (app.rows[index].source,) for call in launch.call_args_list)
+            assert app.amount.get() == '999.99' and asdict(app.rows[index]) == before
+            assert app.selected == index and app.form_changed()
+            app.amount.set(app.rows[index].amount)
         app.add_rows(parse_text('发票号码：00123456\n发票代码：3100214130'))
         app.add_rows(parse_text('00000001'))
         assert app.rows[2].duplicate_of == '2'
@@ -300,6 +320,7 @@ def run_smoke(folder):
                 time.sleep(.15)
         report = {'ok':True,'checks':['native PDF','real offline OCR','90 degree rotation',
                   'GUI background processing','manual correction','unsaved edit protection',
+                  'original and number-crop clicks invoke default viewer for PDF and image; edits preserved',
                   'duplicate marking','Excel text values','all-record Excel summary',
                   'OCR model reuse across batches','content cache for copied files',
                   'fast-mode header reuse plus gross-total OCR and rotated preview',

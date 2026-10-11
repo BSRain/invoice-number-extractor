@@ -2,6 +2,7 @@
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Thread
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -123,10 +124,12 @@ class InvoiceApp:
         self.canvas = tk.Canvas(right,background='white',highlightthickness=1,highlightbackground='#D6DEE5',height=120)
         self.canvas.pack(fill='both',expand=True)
         self.canvas.bind('<Configure>',self.schedule_render)
+        self.canvas.bind('<Button-1>',self.open_original)
         caption_label = ttk.Label(right,textvariable=self.caption,wraplength=460,foreground=MUTED)
         caption_label.pack(fill='x',pady=4)
         self.crop_canvas = tk.Canvas(right,background='white',height=66,highlightthickness=1,highlightbackground='#D6DEE5')
         self.crop_canvas.pack(fill='x')
+        self.crop_canvas.bind('<Button-1>',self.open_original)
         form = ttk.Frame(right,padding=(0,4))
         form.pack(fill='x')
         form.columnconfigure(1,weight=1)
@@ -302,7 +305,24 @@ class InvoiceApp:
         except Exception as exc:
             self.preview = None
             self.reason.set(row.reason+'\n金额：'+row.amount_reason+'\n无法预览：'+str(exc))
+        if self.preview is not None:
+            self.caption.set(self.caption.get()+'  ·  点击预览打开原件')
         self.render()
+
+    def open_original(self, _=None):
+        if self.selected is None:
+            return
+        path = Path(self.rows[self.selected].source)
+        if not path.is_absolute() or path.suffix.lower() not in SUPPORTED:
+            messagebox.showinfo('没有原件文件','该记录没有可打开的原件文件。粘贴文字可在界面中核对。',parent=self.root)
+            return
+        try:
+            if not path.is_file():
+                messagebox.showerror('原件不存在','原件文件已移动或删除，请重新添加文件。\n'+str(path),parent=self.root)
+                return
+            os.startfile(str(path))
+        except OSError as exc:
+            messagebox.showerror('无法打开原件','请检查文件访问权限及 Windows 默认打开程序。\n'+str(exc),parent=self.root)
 
     def schedule_render(self, _=None):
         if self._render_timer:
@@ -314,6 +334,8 @@ class InvoiceApp:
         self._render_timer = None
         self.canvas.delete('all')
         self.crop_canvas.delete('all')
+        self.canvas.configure(cursor='hand2' if self.preview is not None else '')
+        self.crop_canvas.configure(cursor='')
         if self.preview is None:
             self.canvas.create_text(max(self.canvas.winfo_width(),300)//2,110,
                                     text='选择结果查看票面\n\n支持 PDF、图片和文字',fill=MUTED,
@@ -343,6 +365,7 @@ class InvoiceApp:
             crop = crop.resize((max(1,int(crop.width*factor)),max(1,int(crop.height*factor))),Image.Resampling.LANCZOS)
             self._crop_photo = ImageTk.PhotoImage(crop,master=self.root)
             self.crop_canvas.create_image(self.crop_canvas.winfo_width()/2,33,image=self._crop_photo)
+            self.crop_canvas.configure(cursor='hand2')
 
     def confirm(self):
         if self.selected is None:
