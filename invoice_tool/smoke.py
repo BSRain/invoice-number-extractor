@@ -152,7 +152,18 @@ def run_smoke(folder):
         root.update()
         # Capture this HWND only; desktop coordinates can capture another app
         # when a foreground/fullscreen window obscures the test window.
-        ImageGrab.grab(window=int(root.frame(),0)).save(folder/'界面验证.png')
+        # Windows can transiently refuse PrintWindow just after a Tk redraw.
+        # Retry only this application's own frame/client, never the desktop.
+        for attempt in range(3):
+            root.update()
+            handle = root.winfo_id() if attempt == 1 else int(root.frame(),0)
+            try:
+                ImageGrab.grab(window=handle).save(folder/'界面验证.png')
+                break
+            except OSError:
+                if attempt == 2:
+                    raise
+                time.sleep(.15)
         report = {'ok':True,'checks':['native PDF','real offline OCR','90 degree rotation',
                   'GUI background processing','manual correction','unsaved edit protection',
                   'duplicate marking','Excel text values','all-record Excel summary',
