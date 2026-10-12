@@ -110,8 +110,10 @@ class ParallelReader:
                                 for page in doc:
                                     if stop is not None and stop.is_set():
                                         raise InterruptedError()
-                                    rows = extract_invoices(native_reader.native_boxes(page),'pdf')
+                                    boxes = native_reader.native_boxes(page)
+                                    rows = extract_invoices(boxes,'pdf')
                                     if (not rows or not all(r.status == '已识别' for r in rows)
+                                            or native_reader.needs_amount_ocr(page,rows,boxes)
                                             or len(native_rows)+len(rows)>NATIVE_ROWS):
                                         native_rows = None
                                         break

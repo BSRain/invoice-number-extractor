@@ -296,6 +296,25 @@ def run_smoke(folder):
         assert book.active['B19'].value == '00123456'
         assert book.active['B19'].data_type == 's'
         book.close()
+        # Native number text with a bitmap total must bypass the native-only
+        # preflight and supplement the amount in both serial and page workers.
+        hybrid = folder/'文字号码与图片金额.pdf'
+        with fitz.open() as amount_doc:
+            page = amount_doc.new_page(width=800,height=500)
+            page.insert_text((400,430),'Total incl. tax: CNY 113.00',fontsize=20)
+            bitmap = page.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False).tobytes('png')
+        with fitz.open() as doc:
+            for index in range(3):
+                page = doc.new_page(width=800,height=500)
+                page.insert_image(page.rect,stream=bitmap)
+                page.insert_text((370,85),'Invoice No: '+str(26000000000000000001+index),fontsize=16)
+            doc.save(hybrid)
+        serial = list(app.reader.read(hybrid))
+        parallel = [value for kind,value in app.parallel_reader.read([hybrid]) if kind=='row']
+        for rows in (serial,parallel):
+            assert len(rows)==3 and [r.page for r in rows]==[1,2,3]
+            assert [r.invoice_number for r in rows]==[str(26000000000000000001+i) for i in range(3)]
+            assert all((r.method,r.status,r.amount,r.amount_status)==('pdf','已识别','113.00','已识别') for r in rows)
         app.tree.selection_set('1')
         app.tree.focus('1')
         app.tree.see('1')
@@ -328,6 +347,7 @@ def run_smoke(folder):
                   'two real OCR processes, ordered results, reuse and all-row Excel',
                   'reordered copies hit actual worker caches across batches',
                   'single mixed PDF page-parallel OCR, original page order and range cache',
+                  'native number plus bitmap total: independent amount OCR in serial and page workers',
                   'page progress and whole-file completion; 18 rows in both Excel sheets'],
                   'records':[asdict(r) for r in app.rows]}
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

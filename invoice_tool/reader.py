@@ -9,7 +9,7 @@ import re
 from threading import Event
 
 from .core import NUMBER_LABEL, InvoiceRecord, TextBox, extract_invoices, normalize, numbers
-from .amounts import attach_amounts
+from .amounts import TOTAL, SMALL, amount_boxes, attach_amounts, merge_amounts
 
 SUPPORTED = {'.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.txt'}
 MAX_DECODE_PIXELS = 30_000_000
@@ -272,6 +272,7 @@ class InvoiceReader:
             return None
         row.rotation = angle
         row.reason = f'快速模式：{stage}。'+row.reason
+        self._amount_header_boxes = boxes
         return rows
 
     def recognize_image(self, image):
@@ -286,6 +287,8 @@ class InvoiceReader:
                     return []
                 return rows
         best_rows = []
+        best_boxes = []
+        best_image = image
         best_rank = (-1,-1,-1,-1,-1)
         for angle in (0,90,270,180):
             if self.stop.is_set():
@@ -307,6 +310,7 @@ class InvoiceReader:
                     sum(len(r.candidates) for r in rows))
             if rank > best_rank:
                 best_rank,best_rows = rank,rows
+                best_boxes,best_image = boxes,oriented
             # Rotation corrects orientation, not blurred digits. Keep review status
             # when a clear header and all number regions already have a value.
             readable_header = any(b.cy < .5 and b.confidence >= .8
@@ -315,24 +319,123 @@ class InvoiceReader:
                                           or (readable_header and horizontal >= max(3,vertical*3)
                                               and all(r.invoice_number for r in rows))):
                 break
-        return best_rows
+        self.retry_amounts(best_rows,best_image,best_boxes)
+        return [] if self.stop.is_set() else best_rows
+
+    def retry_amounts(self, rows, image, boxes):
+        """At most two small OCR retries per page; accepted amounts take no work."""
+        from PIL import Image, ImageEnhance, ImageOps
+        pending = [i for i,r in enumerate(rows) if r.amount_status not in ('已识别','已确认')]
+        if self.stop.is_set() or not pending:
+            return
+        labels = [b for b in amount_boxes(boxes) if TOTAL.search(b.text) or SMALL.search(b.text)]
+        regions = []
+        for i in pending:
+            row = rows[i]
+            if len(row.amount_candidates) > 1:
+                continue
+            if row.amount_bbox:
+                x0,y0,x1,y1 = row.amount_bbox
+                regions.append((i,(max(0,x0-.015),max(0,y0-.015),min(1,x1+.015),min(1,y1+.015))))
+            elif labels:
+                top = row.bbox[1] if row.bbox else 0
+                bottom = min((r.bbox[1] for r in rows if r.bbox and r.bbox[1]>top+.04),default=1)
+                local = [b for b in labels if top <= b.cy < bottom]
+                if local:
+                    label = next((b for b in local if SMALL.search(b.text)),local[0])
+                    regions.append((i,(0,max(top,label.bbox[1]-.025),1,min(bottom,label.bbox[3]+.045))))
+        if not regions:
+            return
+        attempts = regions[:2] if len(regions)>1 else regions*2
+        width,height = image.size
+        evidence = list(boxes)
+        for attempt,(index,bounds) in enumerate(attempts):
+            row = rows[index]
+            if self.stop.is_set():
+                return
+            if row.amount_status == '已识别' or len(row.amount_candidates)>1:
+                continue
+            x0,y0,x1,y1 = bounds
+            left,top,right,bottom = int(x0*width),int(y0*height),min(width,int(x1*width)),min(height,int(y1*height))
+            if right <= left or bottom <= top:
+                continue
+            crop = image.crop((left,top,right,bottom))
+            scale = min(2,MAX_OCR_SIDE/max(crop.size))
+            crop = crop.resize((max(1,int(crop.width*scale)),max(1,int(crop.height*scale))),Image.Resampling.LANCZOS)
+            if attempt and len(regions)==1:
+                crop = ImageEnhance.Contrast(ImageOps.grayscale(crop)).enhance(1.7).convert('RGB')
+            try:
+                reread = self.ocr_boxes(crop)
+                if self.stop.is_set():
+                    return
+                evidence.extend(TextBox(b.text,((left+b.bbox[0]*(right-left))/width,
+                                                (top+b.bbox[1]*(bottom-top))/height,
+                                                (left+b.bbox[2]*(right-left))/width,
+                                                (top+b.bbox[3]*(bottom-top))/height),b.confidence)
+                                for b in reread)
+                result = attach_amounts(deepcopy(rows),evidence,'ocr')
+                for i in pending:
+                    if rows[i].amount_status != '已识别':
+                        merge_amounts(rows[i],result[i])
+            except Exception as exc:
+                row.amount_reason += '\n金额局部重读失败：'+type(exc).__name__
+                break
+
+    @staticmethod
+    def needs_amount_ocr(page, rows, boxes):
+        if not any(r.amount_status not in ('已识别','已确认') for r in rows):
+            return False
+        if any(TOTAL.search(b.text) or SMALL.search(b.text) for b in amount_boxes(boxes)):
+            return True
+        area = page.rect.width*page.rect.height
+        # A small header QR/logo cannot contain a missing gross total. Invoice
+        # continuation pages have prices and tax, but often no total of their own.
+        for item in page.get_images():
+            for bounds in page.get_image_rects(item[0]):
+                rect = bounds*page.rotation_matrix
+                ratio = rect.width/max(rect.height,1e-6)
+                if rect.y1 <= page.rect.height*.35 and rect.width*rect.height <= area*.08 and .65 <= ratio <= 1.5:
+                    continue
+                return True
+        return False
+
+    def supplement_pdf_amounts(self, rows, page, native_boxes):
+        try:
+            image = page_image(page)
+            boxes = native_boxes+self.ocr_boxes(image)
+            if self.stop.is_set():
+                return
+            result = attach_amounts(deepcopy(rows),boxes,'ocr')
+            for row,other in zip(rows,result):
+                if row.amount_status != '已识别':
+                    merge_amounts(row,other)
+            self.retry_amounts(rows,image,boxes)
+        except Exception as exc:
+            for row in rows:
+                if row.amount_status != '已识别':
+                    row.amount_reason += '\n金额补读失败：'+type(exc).__name__
 
     def read_amount_image(self, rows, image):
         """A successful single-invoice header still needs its gross-total region."""
-        if self.stop.is_set():
+        context = getattr(self,'_amount_header_boxes',[])
+        self._amount_header_boxes = []
+        if self.stop.is_set() or all(r.amount_status == '已识别' for r in rows):
             return
         angle = rows[0].rotation
         oriented = image.rotate(angle, expand=True) if angle else image
         width, height = oriented.size
         top = int(height*.35)
         try:
-            boxes = self.header_boxes(oriented.crop((0, top, width, height)), top, height, height)
-            attach_amounts(rows, boxes, 'ocr')
+            boxes = context+self.header_boxes(oriented.crop((0, top, width, height)), top, height, height)
+            result = attach_amounts(deepcopy(rows),boxes,'ocr')
+            for row,other in zip(rows,result):
+                if row.amount_status != '已识别':
+                    merge_amounts(row,other)
+            self.retry_amounts(rows,oriented,boxes)
         except Exception as exc:
             for row in rows:
-                row.amount = ''
-                row.amount_status = '未识别'
-                row.amount_reason = '金额区域读取失败，请人工补录：'+type(exc).__name__
+                if row.amount_status != '已识别':
+                    row.amount_reason += '\n金额区域读取失败，请人工补录：'+type(exc).__name__
 
     @staticmethod
     def fingerprint(path, stop=None):
@@ -435,7 +538,8 @@ class InvoiceReader:
                             break
                         try:
                             page = doc[index]
-                            rows = extract_invoices(self.native_boxes(page),'pdf')
+                            native_boxes = self.native_boxes(page)
+                            rows = extract_invoices(native_boxes,'pdf')
                             if not all(r.status == '已识别' for r in rows):
                                 native_rows = rows
                                 rows = self.recognize_image(page_image(page))
@@ -443,6 +547,10 @@ class InvoiceReader:
                                     if any(r.invoice_number or r.candidates or r.amount or r.amount_candidates
                                            for r in native_rows):
                                         rows = native_rows
+                            elif self.needs_amount_ocr(page,rows,native_boxes):
+                                self.supplement_pdf_amounts(rows,page,native_boxes)
+                            if self.stop.is_set():
+                                break
                             for row in rows:
                                 row.source,row.page = str(path),index+1
                                 yield row
