@@ -325,25 +325,46 @@ def run_smoke(folder):
         root.update()
         # Review a real, rotated OCR crop without changing any default OCR rule.
         from copy import deepcopy
+        # A minimized owner keeps transient dialogs withdrawn on Windows.
+        # Restore only this opt-in test window before exercising its dialogs.
+        root.deiconify()
+        root.update()
         original=deepcopy(asdict(app.rows[1]))
         app.amount.set('777.77')
         zoom=app.zoom_amount()
         root.update()
         assert zoom is not None and app.amount.get()=='777.77'
         zoom.destroy()
+        root.deiconify()
+        root.update()
         app.amount.set(app.rows[1].amount)
         dialog=app.reread_region()
-        root.update()
+        # A frozen Windows Toplevel may be mapped asynchronously. Require a
+        # visible, stable canvas before deriving event coordinates from it.
+        previous=None
+        stable=0
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            root.update()
+            size=(dialog.canvas.winfo_width(),dialog.canvas.winfo_height())
+            stable=stable+1 if dialog.canvas.winfo_viewable() and min(size)>100 and size==previous else 0
+            if stable>=2:
+                break
+            previous=size
+            time.sleep(.02)
+        assert stable>=2,('Region canvas not ready',size,dialog.canvas.winfo_viewable(),
+                          root.state(),dialog.window.state(),dialog.canvas.winfo_manager())
         dialog.draw()
         x0,y0,x1,y1=app.rows[1].amount_bbox
         left,top,width,height=dialog.image_rect
         start=(int(left+max(0,x0-.015)*width),int(top+max(0,y0-.02)*height))
         end=(int(left+min(1,x1+.015)*width),int(top+min(1,y1+.02)*height))
-        dialog.canvas.event_generate('<ButtonPress-1>',x=start[0],y=start[1])
-        dialog.canvas.event_generate('<B1-Motion>',x=end[0],y=end[1])
-        dialog.canvas.event_generate('<ButtonRelease-1>',x=end[0],y=end[1])
+        dialog.canvas.event_generate('<ButtonPress-1>',x=start[0],y=start[1],when='now')
+        assert dialog.start_point is not None,('Press rejected',dialog.image_rect,start,end)
+        dialog.canvas.event_generate('<B1-Motion>',x=end[0],y=end[1],when='now')
+        dialog.canvas.event_generate('<ButtonRelease-1>',x=end[0],y=end[1],when='now')
         root.update()
-        assert dialog.bounds is not None
+        assert dialog.bounds is not None,(dialog.status.get(),dialog.image_rect,start,end)
         dialog.read_button.invoke()
         deadline=time.monotonic()+90
         while dialog.busy and time.monotonic()<deadline:

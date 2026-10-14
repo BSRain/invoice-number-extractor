@@ -204,6 +204,21 @@ class ReviewUITests(unittest.TestCase):
         self.assertEqual(self.app.amount.get(),'113.00')
         self.assertFalse(self.app.busy)
 
+    def test_actual_drag_bindings_map_to_upright_image(self):
+        dialog=self.dialog()
+        left,top,width,height=dialog.image_rect
+        start=(int(left+.4*width),int(top+.6*height))
+        end=(int(left+.8*width),int(top+.9*height))
+        dialog.canvas.event_generate('<ButtonPress-1>',x=start[0],y=start[1],when='now')
+        self.assertIsNotNone(dialog.start_point)
+        dialog.canvas.event_generate('<B1-Motion>',x=end[0],y=end[1],when='now')
+        dialog.canvas.event_generate('<ButtonRelease-1>',x=end[0],y=end[1],when='now')
+        self.root.update()
+        self.assertIsNotNone(dialog.bounds)
+        for actual,expected in zip(dialog.bounds,(.4,.6,.8,.9)):
+            self.assertAlmostEqual(actual,expected,delta=.004)
+        dialog.cancel()
+
     def test_cancel_during_ocr_waits_then_closes_without_changes(self):
         started,release=Event(),Event()
         before=deepcopy(self.app.rows)
