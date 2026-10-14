@@ -323,6 +323,59 @@ def run_smoke(folder):
         root.update()
         app.render()
         root.update()
+        # Review a real, rotated OCR crop without changing any default OCR rule.
+        from copy import deepcopy
+        original=deepcopy(asdict(app.rows[1]))
+        app.amount.set('777.77')
+        zoom=app.zoom_amount()
+        root.update()
+        assert zoom is not None and app.amount.get()=='777.77'
+        zoom.destroy()
+        app.amount.set(app.rows[1].amount)
+        dialog=app.reread_region()
+        root.update()
+        dialog.draw()
+        x0,y0,x1,y1=app.rows[1].amount_bbox
+        left,top,width,height=dialog.image_rect
+        start=(int(left+max(0,x0-.015)*width),int(top+max(0,y0-.02)*height))
+        end=(int(left+min(1,x1+.015)*width),int(top+min(1,y1+.02)*height))
+        dialog.canvas.event_generate('<ButtonPress-1>',x=start[0],y=start[1])
+        dialog.canvas.event_generate('<B1-Motion>',x=end[0],y=end[1])
+        dialog.canvas.event_generate('<ButtonRelease-1>',x=end[0],y=end[1])
+        root.update()
+        assert dialog.bounds is not None
+        dialog.read_button.invoke()
+        deadline=time.monotonic()+90
+        while dialog.busy and time.monotonic()<deadline:
+            root.update()
+            time.sleep(.02)
+        assert not dialog.busy and dialog.candidates,dialog.status.get()
+        chosen=next(i for i,item in enumerate(dialog.candidates) if item['value']=='113.00')
+        assert dialog.choice.current()==-1 and asdict(app.rows[1])==original
+        dialog.choice.current(chosen)
+        dialog.use_button.invoke()
+        root.update()
+        assert asdict(app.rows[1])==original and app.form_changed()
+        app.confirm()
+        assert (app.rows[1].amount,app.rows[1].amount_status)==('113.00','已确认')
+        app.review_filter.set('金额待处理')
+        app.apply_filter()
+        root.update()
+        assert all(app.rows[int(i)].amount_status not in ('已识别','已确认') for i in app.tree.get_children())
+        with patch('invoice_tool.gui.filedialog.asksaveasfilename',return_value=str(exported)):
+            app.export()
+        book=load_workbook(exported)
+        assert all(sheet.max_row==19 for sheet in book)
+        book.close()
+        app.review_filter.set('全部记录')
+        app.apply_filter()
+        app.tree.selection_set('1')
+        root.update()
+        app.region_tabs.select(1)
+        root.update()
+        app.render()
+        root.update()
+        assert app.amount_canvas.cget('cursor')=='hand2'
         # Capture this HWND only; desktop coordinates can capture another app
         # when a foreground/fullscreen window obscures the test window.
         # Windows can transiently refuse PrintWindow just after a Tk redraw.
@@ -350,6 +403,9 @@ def run_smoke(folder):
                   'native number plus bitmap total: independent amount OCR in serial and page workers',
                   'page progress and whole-file completion; 18 rows in both Excel sheets'],
                   'records':[asdict(r) for r in app.rows]}
+        report['checks'].extend(['independent amount zoom preserves unsaved edits',
+                                'real mouse-drag region OCR on rotated preview; explicit choice and save',
+                                'amount pending filter keeps all 18 rows in exported Excel'])
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0
     except Exception as exc:
