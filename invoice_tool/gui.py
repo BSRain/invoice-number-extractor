@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 from .core import confirm_record, export_excel, mark_duplicates
 from .reader import InvoiceReader, SUPPORTED, collect_inputs, parse_text, preview_image
 from .pipeline import ParallelReader
+from .review import FILTERS, visible_indices, next_review_index, crop_region
 
 BG, INK, MUTED, ACCENT = '#F3F5F7', '#18334D', '#546579', '#176B57'
 
@@ -26,11 +27,14 @@ class InvoiceApp:
         self.dirty = False
         self.selected = None
         self.preview = None
+        self._region_pending = None
         self._photo = self._crop_photo = None
         self._render_timer = None
         self.number = tk.StringVar()
         self.code = tk.StringVar()
         self.amount = tk.StringVar()
+        self.review_filter = tk.StringVar(value='全部记录')
+        self._filter_applied = '全部记录'
         self.single_invoice = tk.BooleanVar(value=False)
         self.parallel = tk.BooleanVar(value=False)
         self.caption = tk.StringVar(value='选择一条结果，查看原件并核对号码。')
@@ -93,10 +97,19 @@ class InvoiceApp:
         panes = ttk.Panedwindow(self.root,orient='horizontal')
         panes.pack(fill='both',expand=True,padx=20,pady=8)
         left = ttk.Frame(panes)
-        right = ttk.Frame(panes,padding=(12,0,0,0))
+        from .review_dialog import ReviewScroll
+        self.review_panel=ReviewScroll(panes)
+        right=self.review_panel.content
         panes.add(left,weight=3)
-        panes.add(right,weight=2)
-        ttk.Label(left,text='识别结果',font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w',pady=(0,8))
+        panes.add(self.review_panel,weight=2)
+        result_toolbar = ttk.Frame(left)
+        result_toolbar.pack(fill='x',pady=(0,8))
+        ttk.Label(result_toolbar,text='识别结果',font=('Microsoft YaHei UI',12,'bold')).pack(side='left')
+        ttk.Label(result_toolbar,text='筛选').pack(side='left',padx=(12,4))
+        self.filter_entry = ttk.Combobox(result_toolbar,textvariable=self.review_filter,
+                                         values=FILTERS,state='readonly',width=13)
+        self.filter_entry.pack(side='left')
+        self.filter_entry.bind('<<ComboboxSelected>>',self.apply_filter)
         table = ttk.Frame(left)
         table.pack(fill='both',expand=True)
         table.rowconfigure(0,weight=1)
@@ -119,17 +132,33 @@ class InvoiceApp:
         self.tree.tag_configure('失败',background='#FDEBEC')
         self.tree.tag_configure('已确认',background='#E8F4ED')
         self.tree.bind('<<TreeviewSelect>>',self.select)
-        ttk.Label(left,textvariable=self.summary,foreground=MUTED).pack(anchor='w',pady=10)
-        ttk.Label(right,text='原件与号码区域',font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w',pady=(0,8))
-        self.canvas = tk.Canvas(right,background='white',highlightthickness=1,highlightbackground='#D6DEE5',height=120)
+        summary_label=ttk.Label(left,textvariable=self.summary,foreground=MUTED,wraplength=500)
+        summary_label.pack(side='bottom',fill='x',pady=8,before=table)
+        left.bind('<Configure>',lambda event:summary_label.configure(wraplength=max(150,event.width-12)))
+        ttk.Label(right,text='原件与区域预览',font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w',pady=(0,8))
+        self.canvas = tk.Canvas(right,background='white',highlightthickness=1,highlightbackground='#D6DEE5',height=80)
         self.canvas.pack(fill='both',expand=True)
         self.canvas.bind('<Configure>',self.schedule_render)
         self.canvas.bind('<Button-1>',self.open_original)
         caption_label = ttk.Label(right,textvariable=self.caption,wraplength=460,foreground=MUTED)
         caption_label.pack(fill='x',pady=4)
-        self.crop_canvas = tk.Canvas(right,background='white',height=66,highlightthickness=1,highlightbackground='#D6DEE5')
+        self.region_tabs = ttk.Notebook(right,height=66)
+        self.region_tabs.pack(fill='x')
+        number_tab,amount_tab=ttk.Frame(self.region_tabs),ttk.Frame(self.region_tabs)
+        self.region_tabs.add(number_tab,text='号码区域')
+        self.region_tabs.add(amount_tab,text='金额区域')
+        self.crop_canvas = tk.Canvas(number_tab,background='white',height=66,highlightthickness=1,highlightbackground='#D6DEE5')
         self.crop_canvas.pack(fill='x')
         self.crop_canvas.bind('<Button-1>',self.open_original)
+        self.amount_canvas = tk.Canvas(amount_tab,background='white',height=66,highlightthickness=1,highlightbackground='#D6DEE5')
+        self.amount_canvas.pack(fill='x')
+        self.amount_canvas.bind('<Button-1>',self.zoom_amount)
+        self.amount_canvas.bind('<Configure>',self.schedule_render)
+        preview_actions=ttk.Frame(right)
+        preview_actions.pack(fill='x',pady=2)
+        ttk.Button(preview_actions,text='放大金额',command=self.zoom_amount).pack(side='left')
+        self.region_button=ttk.Button(preview_actions,text='框选金额重读',command=self.reread_region)
+        self.region_button.pack(side='left',padx=8)
         form = ttk.Frame(right,padding=(0,4))
         form.pack(fill='x')
         form.columnconfigure(1,weight=1)
@@ -143,19 +172,22 @@ class InvoiceApp:
         ttk.Label(form,text='价税合计').grid(row=3,column=0,sticky='w',padx=(0,12),pady=4)
         self.amount_entry = ttk.Combobox(form,textvariable=self.amount,font=('Consolas',12))
         self.amount_entry.grid(row=3,column=1,sticky='ew',pady=4)
-        ttk.Label(form,text='含税人民币金额；可填负数，未确定时留空。',foreground=MUTED).grid(
-            row=4,column=0,columnspan=2,sticky='w',pady=2)
+        amount_help=ttk.Label(form,text='含税人民币金额；可填负数，未确定时留空。',foreground=MUTED,wraplength=460)
+        amount_help.grid(row=4,column=0,columnspan=2,sticky='w',pady=2)
         actions = ttk.Frame(right)
         actions.pack(fill='x')
-        ttk.Button(actions,text='保存并确认',command=self.confirm,style='Primary.TButton').pack(side='left')
-        ttk.Button(actions,text='下一条待复核',command=self.next_review).pack(side='right')
+        actions.columnconfigure((0,1),weight=1)
+        ttk.Button(actions,text='保存并确认',command=self.confirm,style='Primary.TButton').grid(row=0,column=0,sticky='ew',padx=(0,4))
+        ttk.Button(actions,text='确认并下一条',command=lambda:self.confirm(advance=True)).grid(row=0,column=1,sticky='ew')
+        ttk.Button(actions,text='下一条待复核',command=self.next_review).grid(row=1,column=0,columnspan=2,sticky='ew',pady=(4,0))
         reason_label = ttk.Label(right,textvariable=self.reason,wraplength=460,foreground=MUTED)
         reason_label.pack(fill='x',pady=(4,0))
         right.bind('<Configure>',lambda event: [label.configure(wraplength=max(100,event.width-20))
-                                                for label in (caption_label,help_label,reason_label)])
+                                                for label in (caption_label,help_label,amount_help,reason_label)],add='+')
+        self.review_panel.bind_focus()
         progress = ttk.Frame(self.root,padding=(20,4,20,12))
-        progress.pack(fill='x')
-        ttk.Label(progress,textvariable=self.progress_text,foreground=MUTED).pack(anchor='w')
+        progress.pack(side='bottom',fill='x',before=panes)
+        ttk.Label(progress,textvariable=self.progress_text,foreground=MUTED,wraplength=900).pack(anchor='w')
         self.progress = ttk.Progressbar(progress,mode='determinate')
         self.progress.pack(fill='x',pady=(8,0))
         self.render()
@@ -221,6 +253,7 @@ class InvoiceApp:
             button.configure(state='disabled' if busy else 'normal')
         self.stop_button.configure(state='normal' if busy else 'disabled')
         self.export_button.configure(state='disabled' if busy else 'normal')
+        self.region_button.configure(state='disabled' if busy else 'normal')
 
     def poll(self):
         new_rows = []
@@ -252,12 +285,14 @@ class InvoiceApp:
         self.rows.extend(rows)
         self.dirty = True
         self.refresh()
-        if self.selected is None and self.rows:
-            self.tree.selection_set('0')
-            self.tree.focus('0')
+        indices=visible_indices(self.rows,self.review_filter.get())
+        if self.selected is None and indices:
+            self.tree.selection_set(str(indices[0]))
+            self.tree.focus(str(indices[0]))
 
     def refresh(self):
         mark_duplicates(self.rows)
+        visible=set(visible_indices(self.rows,self.review_filter.get()))
         for index,row in enumerate(self.rows):
             values = (Path(row.source).name,row.page,row.invoice_number or '—',
                       row.amount or '—',row.amount_status,row.status,
@@ -266,10 +301,79 @@ class InvoiceApp:
                 self.tree.item(str(index),values=values,tags=(row.status,))
             else:
                 self.tree.insert('','end',iid=str(index),values=values,tags=(row.status,))
+            if index in visible:
+                self.tree.move(str(index),'','end')
+            else:
+                self.tree.detach(str(index))
         review = sum(r.status not in ('已识别','已确认') for r in self.rows)
         duplicates = sum(bool(r.duplicate_of) for r in self.rows)
         amount_review = sum(r.amount_status not in ('已识别','已确认') for r in self.rows)
-        self.summary.set(f'{len(self.rows)} 条  ·  号码待处理 {review}  ·  金额待处理 {amount_review}  ·  重复 {duplicates}')
+        self.summary.set(f'显示 {len(visible)}/{len(self.rows)} 条 · 号码待处理 {review} · 金额待处理 {amount_review} · 重复 {duplicates}')
+
+    def apply_filter(self, _=None):
+        if self.form_changed():
+            self.review_filter.set(self._filter_applied)
+            messagebox.showinfo('修改尚未保存','请先保存并确认当前修改，再切换筛选。',parent=self.root)
+            return
+        self._filter_applied=self.review_filter.get()
+        self.refresh()
+        indices=visible_indices(self.rows,self.review_filter.get())
+        if self.selected not in indices:
+            self.clear_detail()
+            if indices:
+                self.tree.selection_set(str(indices[0]))
+                self.tree.focus(str(indices[0]))
+
+    def clear_detail(self):
+        self.tree.selection_remove(*self.tree.selection())
+        self.selected=None
+        self.preview=None
+        self._region_pending=None
+        for variable in (self.number,self.code,self.amount,self.reason):
+            variable.set('')
+        self.number_entry.configure(values=())
+        self.amount_entry.configure(values=())
+        self.caption.set('当前筛选下没有选中记录。导出仍包含全部结果。')
+        self.render()
+
+    def zoom_amount(self, _=None):
+        if self.preview is None or self.selected is None:
+            messagebox.showinfo('没有可用票面','请先选择有原件预览的记录。',parent=self.root)
+            return
+        bounds=self.rows[self.selected].amount_bbox
+        if not bounds:
+            messagebox.showinfo('未定位金额','尚未定位金额区域，可使用“框选金额重读”。',parent=self.root)
+            return
+        from .review_dialog import show_amount
+        return show_amount(self.root,self.preview,bounds)
+
+    def reread_region(self):
+        if self.busy:
+            return
+        if self.selected is None or self.preview is None:
+            messagebox.showinfo('没有可用票面','请先选择有原件预览的记录。',parent=self.root)
+            return
+        from .review_dialog import RegionDialog
+        try:
+            row=self.rows[self.selected]
+            image=preview_image(row,max_side=2400)
+            if image is None:
+                raise ValueError('该记录没有可识别的原件图片。')
+        except Exception as exc:
+            messagebox.showerror('无法读取原件',str(exc),parent=self.root)
+            return
+        return RegionDialog(self,image,row)
+
+    def accept_region_candidate(self, row, candidates, chosen):
+        # Adoption edits only the form. Saving is the explicit commit boundary.
+        if self.selected is None or self.rows[self.selected] is not row:
+            return False
+        self._region_pending=(row,candidates,chosen)
+        self.amount_entry.configure(values=list(dict.fromkeys(row.amount_candidates+
+                                                [item['value'] for item in candidates])))
+        self.amount.set(chosen['value'])
+        self.reason.set(row.reason+'\n框选重读候选已填入，请对照原件后保存并确认。')
+        return True
 
     def select(self, _=None):
         selected = self.tree.selection()
@@ -282,8 +386,7 @@ class InvoiceApp:
             choice = messagebox.askyesnocancel('修改尚未保存','保存当前号码及金额修改并确认后，切换到下一条？',parent=self.root)
             if choice is True:
                 try:
-                    confirm_record(self.rows[self.selected],self.number.get(),self.code.get(),self.amount.get())
-                    self.dirty = True
+                    self.save_form()
                     self.refresh()
                 except ValueError as exc:
                     messagebox.showerror('字段格式不正确',str(exc),parent=self.root)
@@ -292,6 +395,7 @@ class InvoiceApp:
                 self.tree.selection_set(str(self.selected))
                 return
         self.selected = index
+        self._region_pending = None
         row = self.rows[self.selected]
         self.number.set(row.invoice_number)
         self.code.set(row.invoice_code)
@@ -334,6 +438,8 @@ class InvoiceApp:
         self._render_timer = None
         self.canvas.delete('all')
         self.crop_canvas.delete('all')
+        self.amount_canvas.delete('all')
+        self.amount_canvas.configure(cursor='')
         self.canvas.configure(cursor='hand2' if self.preview is not None else '')
         self.crop_canvas.configure(cursor='')
         if self.preview is None:
@@ -351,6 +457,20 @@ class InvoiceApp:
             x0,y0,x1,y1 = row.amount_bbox
             ImageDraw.Draw(image).rectangle((int(x0*w),int(y0*h),int(x1*w),int(y1*h)),
                                             outline=ACCENT,width=3)
+            try:
+                padding=.012
+                area=(max(0,x0-padding),max(0,y0-padding),min(1,x1+padding),min(1,y1+padding))
+                amount_crop=crop_region(self.preview,area)
+                scale=min(max(100,self.amount_canvas.winfo_width()-16)/amount_crop.width,
+                          54/amount_crop.height,3)
+                amount_crop=amount_crop.resize((max(1,int(amount_crop.width*scale)),max(1,int(amount_crop.height*scale))),Image.Resampling.LANCZOS)
+                self._amount_photo=ImageTk.PhotoImage(amount_crop,master=self.root)
+                self.amount_canvas.create_image(self.amount_canvas.winfo_width()/2,33,image=self._amount_photo)
+                self.amount_canvas.configure(cursor='hand2')
+            except ValueError:
+                self.amount_canvas.create_text(12,20,anchor='nw',text='金额区域不可用，请框选重读。',fill=MUTED)
+        else:
+            self.amount_canvas.create_text(12,20,anchor='nw',text='未定位金额，可框选重读。',fill=MUTED)
         if row.bbox:
             w,h = image.size
             x0,y0,x1,y1 = row.bbox
@@ -367,32 +487,47 @@ class InvoiceApp:
             self.crop_canvas.create_image(self.crop_canvas.winfo_width()/2,33,image=self._crop_photo)
             self.crop_canvas.configure(cursor='hand2')
 
-    def confirm(self):
-        if self.selected is None:
-            return
-        try:
-            confirm_record(self.rows[self.selected],self.number.get(),self.code.get(),self.amount.get())
-        except ValueError as exc:
-            messagebox.showerror('字段格式不正确',str(exc),parent=self.root)
-            return
+    def save_form(self):
+        """One atomic confirmation path for buttons and save-before-switch."""
+        confirm_record(self.rows[self.selected],self.number.get(),self.code.get(),self.amount.get())
+        if self._region_pending:
+            row,candidates,chosen=self._region_pending
+            if self.rows[self.selected] is row and row.amount==chosen['value']:
+                row.amount_candidates=list(dict.fromkeys(row.amount_candidates+
+                                                        [item['value'] for item in candidates]))
+                row.amount_bbox=chosen['bbox']
+                row.amount_reason='人工框选重读后核对并确认。'
+            self._region_pending=None
         self.dirty = True
         self.number.set(self.rows[self.selected].invoice_number)
         self.code.set(self.rows[self.selected].invoice_code)
         self.amount.set(self.rows[self.selected].amount)
+
+    def confirm(self, advance=False):
+        if self.selected is None:
+            return
+        try:
+            self.save_form()
+        except ValueError as exc:
+            messagebox.showerror('字段格式不正确',str(exc),parent=self.root)
+            return
         self.refresh()
-        self.select()
+        if advance or self.selected not in visible_indices(self.rows,self.review_filter.get()):
+            if not self.next_review():
+                self.clear_detail()
+        else:
+            self.select()
+        return True
 
     def next_review(self):
-        start = self.selected+1 if self.selected is not None else 0
-        order = list(range(start,len(self.rows)))+list(range(start))
-        for index in order:
-            if (self.rows[index].status not in ('已识别','已确认') or
-                    self.rows[index].amount_status not in ('已识别','已确认')):
-                self.tree.selection_set(str(index))
-                self.tree.focus(str(index))
-                self.tree.see(str(index))
-                return
-        self.progress_text.set('没有待复核或未识别的结果。')
+        index=next_review_index(self.rows,self.selected,self.review_filter.get())
+        if index is not None:
+            self.tree.selection_set(str(index))
+            self.tree.focus(str(index))
+            self.tree.see(str(index))
+            return True
+        self.progress_text.set('当前筛选下没有待处理记录。导出仍包含全部结果。')
+        return False
 
     def paste(self):
         dialog = tk.Toplevel(self.root)
@@ -441,11 +576,15 @@ class InvoiceApp:
     def clear(self):
         if (self.dirty or self.form_changed()) and not messagebox.askyesno('清空结果','结果尚未导出，仍要清空吗？',parent=self.root):
             return
+        for index in range(len(self.rows)):
+            self.tree.delete(str(index))
         self.rows.clear()
         self.paths_seen.clear()
-        self.tree.delete(*self.tree.get_children())
+        self.review_filter.set('全部记录')
+        self._filter_applied='全部记录'
         self.selected = None
         self.preview = None
+        self._region_pending = None
         self.dirty = False
         self.number.set('')
         self.code.set('')
@@ -469,7 +608,7 @@ class InvoiceApp:
         if self.selected is None:
             return False
         row = self.rows[self.selected]
-        return (self.number.get(),self.code.get(),self.amount.get()) != (
+        return bool(self._region_pending) or (self.number.get(),self.code.get(),self.amount.get()) != (
             row.invoice_number,row.invoice_code,row.amount)
 
 

@@ -3,6 +3,9 @@ from copy import deepcopy
 from PIL import Image
 from invoice_tool.core import InvoiceRecord, TextBox
 from invoice_tool.review import visible_indices, next_review_index, crop_region, display_region, region_candidates
+from invoice_tool.review import recognize_region
+from invoice_tool.reader import InvoiceReader
+from unittest.mock import patch
 
 
 class ReviewTests(unittest.TestCase):
@@ -48,6 +51,37 @@ class ReviewTests(unittest.TestCase):
     def test_region_does_not_guess_digits_accept_foreign_currency_or_bank_numbers(self):
         boxes=[TextBox('1O.00 USD 99.00 1234567890123456789',(0,0,1,1))]
         self.assertEqual(region_candidates(boxes,(0,0,1,1)),[])
+
+    def test_reread_uses_only_crop_once_and_does_not_change_input(self):
+        reader=InvoiceReader()
+        image=Image.new('RGB',(1000,600))
+        with patch.object(reader,'ocr_boxes',return_value=[TextBox('￥113.00',(0,0,1,1),.8)]) as ocr:
+            result=recognize_region(reader,image,(.5,.5,.9,.8))
+        self.assertEqual(ocr.call_count,1)
+        self.assertLess(ocr.call_args.args[0].width,image.width)
+        self.assertEqual(result[0]['value'],'113.00')
+        self.assertEqual(result[0]['bbox'],(.5,.5,.9,.8))
+        self.assertEqual(image.size,(1000,600))
+
+    def test_cancel_before_and_during_reread_emits_no_candidates(self):
+        reader=InvoiceReader()
+        image=Image.new('RGB',(1000,600))
+        reader.stop.set()
+        with patch.object(reader,'ocr_boxes') as ocr:
+            self.assertEqual(recognize_region(reader,image,(0,0,1,1)),[])
+        ocr.assert_not_called()
+        reader.stop.clear()
+        def canceled(_):
+            reader.stop.set()
+            return [TextBox('￥113.00',(0,0,1,1))]
+        with patch.object(reader,'ocr_boxes',side_effect=canceled):
+            self.assertEqual(recognize_region(reader,image,(0,0,1,1)),[])
+
+    def test_crop_reread_failures_are_reported_and_never_fabricated(self):
+        reader=InvoiceReader()
+        with patch.object(reader,'ocr_boxes',side_effect=RuntimeError('OCR unavailable')):
+            with self.assertRaisesRegex(RuntimeError,'OCR unavailable'):
+                recognize_region(reader,Image.new('RGB',(1000,600)),(0,0,1,1))
 
 
 if __name__=='__main__':

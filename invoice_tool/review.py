@@ -63,3 +63,16 @@ def region_candidates(boxes, bounds):
             if value not in found or box.confidence>found[value]['confidence']:
                 found[value]={'value':value,'confidence':box.confidence,'bbox':mapped}
     return list(found.values())
+
+
+def recognize_region(reader, image, bounds):
+    """One bounded OCR call; cancellation produces no adoptable candidates."""
+    if reader.stop.is_set():
+        return []
+    crop=crop_region(image,bounds)
+    scale=min(2,2400/max(crop.size))
+    if scale!=1:
+        from PIL import Image
+        crop=crop.resize((max(1,int(crop.width*scale)),max(1,int(crop.height*scale))),Image.Resampling.LANCZOS)
+    boxes=reader.ocr_boxes(crop)
+    return [] if reader.stop.is_set() else region_candidates(boxes,bounds)
