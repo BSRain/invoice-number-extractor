@@ -40,6 +40,16 @@ class TaskFileTests(unittest.TestCase):
         self.assertEqual(decode_task(encoded).rows,self.state.rows)
         self.assertNotIn(b'%PDF',encoded)
 
+    def test_recovery_metadata_is_explicit_and_local_only(self):
+        self.state.is_recovery=True
+        self.state.recovery_of=str(self.path)
+        restored=decode_task(encode_task(self.state))
+        self.assertTrue(restored.is_recovery)
+        self.assertEqual(restored.recovery_of,str(self.path))
+        self.state.recovery_of='https://example.com/task.invtask'
+        with self.assertRaises(ValueError):
+            encode_task(self.state)
+
     def test_region_draft_keeps_conflicts_and_chosen_location(self):
         item={'value':'113.00','confidence':.8,'bbox':(.6,.7,.9,.8)}
         self.state.draft['region']={'candidates':[item], 'chosen':item}

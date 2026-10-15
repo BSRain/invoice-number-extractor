@@ -41,6 +41,8 @@ class InvoiceApp:
         self.reason = tk.StringVar()
         self.summary = tk.StringVar(value='暂无结果')
         self.progress_text = tk.StringVar(value='拖入文件或文件夹，也可以点击“添加文件”。')
+        from .task_ui import TaskController
+        self.tasks=TaskController(self)
         root.title('发票号码与金额提取 · 本地版')
         width = min(1360,max(980,root.winfo_screenwidth()-80))
         height = min(900,max(640,root.winfo_screenheight()-100))
@@ -51,6 +53,8 @@ class InvoiceApp:
         root.protocol('WM_DELETE_WINDOW',self.close)
         root.bind('<Control-o>',lambda _: self.choose_files())
         root.bind('<Control-s>',lambda _: self.export())
+        root.bind('<Control-Shift-S>',lambda _:self.tasks.save())
+        root.bind('<Control-Shift-O>',lambda _:self.tasks.open())
         root.bind('<Control-Return>',lambda _: self.confirm())
         root.after(120,self.poll)
 
@@ -81,6 +85,7 @@ class InvoiceApp:
         self.clear_button.pack(side='right',padx=8)
         self.stop_button = ttk.Button(toolbar,text='停止识别',command=self.cancel,state='disabled')
         self.stop_button.pack(side='right')
+        self.tasks.build(self.root)
         options = ttk.Frame(self.root,padding=(20,0,20,4))
         options.pack(fill='x')
         self.fast_check = ttk.Checkbutton(options,text='快速模式（每页只有一张发票）',
@@ -254,6 +259,7 @@ class InvoiceApp:
         self.stop_button.configure(state='normal' if busy else 'disabled')
         self.export_button.configure(state='disabled' if busy else 'normal')
         self.region_button.configure(state='disabled' if busy else 'normal')
+        self.tasks.set_busy(busy)
 
     def poll(self):
         new_rows = []
@@ -268,6 +274,7 @@ class InvoiceApp:
                     self.progress_text.set(f'正在处理 {index+1}/{count}：{name}')
                 elif kind == 'done':
                     self.paths_seen.update(data)
+                    self.tasks.changed()
                     self.set_busy(False)
                     self.progress.configure(value=len(data) if self.stop.is_set() else self.progress['maximum'])
                     self.progress_text.set('已停止，已读取结果可导出。' if self.stop.is_set() else '识别完成。选择结果核对，修改后点击“保存并确认”。')
@@ -279,11 +286,14 @@ class InvoiceApp:
             pass
         if new_rows:
             self.add_rows(new_rows)
+        if self.tasks.poll():
+            return
         self.root.after(120,self.poll)
 
     def add_rows(self, rows):
         self.rows.extend(rows)
         self.dirty = True
+        self.tasks.changed()
         self.refresh()
         indices=visible_indices(self.rows,self.review_filter.get())
         if self.selected is None and indices:
@@ -316,6 +326,7 @@ class InvoiceApp:
             messagebox.showinfo('修改尚未保存','请先保存并确认当前修改，再切换筛选。',parent=self.root)
             return
         self._filter_applied=self.review_filter.get()
+        self.tasks.changed()
         self.refresh()
         indices=visible_indices(self.rows,self.review_filter.get())
         if self.selected not in indices:
@@ -372,6 +383,7 @@ class InvoiceApp:
         self.amount_entry.configure(values=list(dict.fromkeys(row.amount_candidates+
                                                 [item['value'] for item in candidates])))
         self.amount.set(chosen['value'])
+        self.tasks.changed()
         self.reason.set(row.reason+'\n框选重读候选已填入，请对照原件后保存并确认。')
         return True
 
@@ -394,6 +406,8 @@ class InvoiceApp:
             if choice is None:
                 self.tree.selection_set(str(self.selected))
                 return
+        if self.selected!=index:
+            self.tasks.changed()
         self.selected = index
         self._region_pending = None
         row = self.rows[self.selected]
@@ -499,6 +513,7 @@ class InvoiceApp:
                 row.amount_reason='人工框选重读后核对并确认。'
             self._region_pending=None
         self.dirty = True
+        self.tasks.changed()
         self.number.set(self.rows[self.selected].invoice_number)
         self.code.set(self.rows[self.selected].invoice_code)
         self.amount.set(self.rows[self.selected].amount)
@@ -594,13 +609,18 @@ class InvoiceApp:
         self.progress.configure(value=0)
         self.refresh()
         self.render()
+        self.tasks.reset()
 
     def close(self):
         if self.busy:
             messagebox.showinfo('正在识别','请先停止识别，保留结果后再退出。',parent=self.root)
             return
-        if (self.dirty or self.form_changed()) and not messagebox.askyesno('退出程序','结果尚未导出，仍要退出吗？',parent=self.root):
+        if self.tasks.needs_warning() and not messagebox.askyesno('退出程序','当前进度尚未保存到任务或导出，仍要退出吗？',parent=self.root):
             return
+        self.tasks.finish(self.finish_close)
+
+    def finish_close(self):
+        self.tasks.writer.close()
         self.parallel_reader.close()
         self.root.destroy()
 

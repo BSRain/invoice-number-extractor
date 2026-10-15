@@ -30,6 +30,7 @@ class TaskState:
     parallel: bool = False
     saved_at: str = ''
     recovery_of: str | None = None
+    is_recovery: bool = False
 
 
 def _require(condition, message='任务内容无效或版本不兼容。'):
@@ -109,7 +110,7 @@ def _state(payload):
     for path in paths:
         _source(path)
     _require(payload['review_filter'] in FILTERS)
-    for name in ('single_invoice','parallel'):
+    for name in ('single_invoice','parallel','is_recovery'):
         _require(type(payload[name]) is bool)
     selected=payload['selected']
     _require(selected is None or type(selected) is int and 0<=selected<len(rows))
@@ -140,7 +141,7 @@ def _state(payload):
         _source(recovery_of)
         _require(Path(recovery_of).is_absolute() and Path(recovery_of).suffix.lower()=='.invtask')
     return TaskState(rows,set(paths),payload['review_filter'],selected,draft,
-                     payload['single_invoice'],payload['parallel'],timestamp,recovery_of)
+                     payload['single_invoice'],payload['parallel'],timestamp,recovery_of,payload['is_recovery'])
 
 
 def _canonical(value):
