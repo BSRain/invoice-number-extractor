@@ -199,3 +199,28 @@ class TaskUITests(unittest.TestCase):
              patch.object(self.app.tasks,'submit_recovery') as submit:
             self.app.tasks.poll()
         submit.assert_called_once()
+
+    def test_save_as_then_immediate_exit_waits_for_new_recovery_origin(self):
+        with patch('invoice_tool.task_ui.filedialog.askdirectory',return_value=self.folder.name):
+            self.app.tasks.enabled.set(True)
+            self.app.tasks.toggle()
+        self.wait_result()
+        self.assertTrue(self.app.tasks.save(self.path))
+        finished=[]
+        self.app.tasks.finish(lambda:finished.append(True))
+        self.assertFalse(finished)
+        self.wait_result()
+        self.assertEqual(finished,[True])
+        self.assertEqual(load_task(self.app.tasks.recovery_path).recovery_of,str(self.path))
+
+    def test_manual_save_cannot_share_active_recovery_destination(self):
+        with patch('invoice_tool.task_ui.filedialog.askdirectory',return_value=self.folder.name):
+            self.app.tasks.enabled.set(True)
+            self.app.tasks.toggle()
+        self.wait_result()
+        recovery_path=self.app.tasks.recovery_path
+        previous=recovery_path.read_bytes()
+        with patch('invoice_tool.task_ui.messagebox.showerror'):
+            self.assertFalse(self.app.tasks.save(recovery_path))
+        self.assertEqual(recovery_path.read_bytes(),previous)
+        self.assertIsNone(self.app.tasks.path)

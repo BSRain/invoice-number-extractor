@@ -108,6 +108,9 @@ class TaskController:
         if not path:
             return False
         try:
+            if (self.enabled.get() and self.recovery_path is not None and
+                    Path(path).resolve()==self.recovery_path.resolve()):
+                raise ValueError('任务文件不能与正在使用的自动恢复副本同名，请选择其他文件名。')
             save_task(path,self.snapshot())
         except Exception as exc:
             messagebox.showerror('保存任务失败',str(exc),parent=self.app.root)
@@ -117,6 +120,9 @@ class TaskController:
         self.status.set('任务已保存：'+str(self.path))
         # The recovery metadata should follow a new Save As path as well.
         if self.enabled.get():
+            self.generation+=1
+            self.writer.discard_pending()
+            self.recovered_revision=None
             self.submitted_revision=None
             self.due=time.monotonic()
         return True

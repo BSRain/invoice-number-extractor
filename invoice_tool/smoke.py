@@ -428,9 +428,24 @@ def run_smoke(folder):
             time.sleep(.02)
         assert app.tasks.recovered_revision==app.tasks.revision,app.tasks.status.get()
         recovery_path=app.tasks.recovery_path
-        for timer in root.tk.call('after','info'):
-            root.after_cancel(timer)
+        # Saving while recovery is enabled changes its origin metadata. Exit
+        # must wait for that final snapshot, even with no field edits.
+        assert app.tasks.save(task_path)
+        closed=[]
+        finish_close=app.finish_close
+        def close_completed():
+            for timer in root.tk.call('after','info'):
+                root.after_cancel(timer)
+            closed.append(True)
+            finish_close()
+        app.finish_close=close_completed
         app.close()
+        assert not closed
+        deadline=time.monotonic()+15
+        while not closed and time.monotonic()<deadline:
+            root.update()
+            time.sleep(.02)
+        assert closed,'Final recovery snapshot did not finish.'
         root=None
         root,app=create_app()
         root.attributes('-topmost',True)
@@ -448,6 +463,7 @@ def run_smoke(folder):
             assert app.tasks.open(recovery_path)
         root.update()
         assert app.tasks.path is None and not app.tasks.enabled.get()
+        assert '原任务 '+task_path.name in app.tasks.status.get()
         assert app.tasks.needs_warning() and app.amount.get()=='12.'
         assert [asdict(row) for row in app.rows]==before
         # A moved original does not prevent opening, preserving or exporting.
