@@ -411,6 +411,65 @@ def run_smoke(folder):
                 if attempt == 2:
                     raise
                 time.sleep(.15)
+        # Persist an unconfirmed region draft, shut down this session, and open
+        # the exact task in a fresh Tk/Reader session without rerunning OCR.
+        task_path=folder/'继续核对.invtask'
+        before=[asdict(row) for row in app.rows]
+        candidate=dict(value='113.00',confidence=.8,bbox=app.rows[1].amount_bbox)
+        app.accept_region_candidate(app.rows[1],[candidate],candidate)
+        app.amount.set('12.')
+        assert app.tasks.save(task_path)
+        with patch('invoice_tool.task_ui.filedialog.askdirectory',return_value=str(folder)):
+            app.tasks.enabled.set(True)
+            app.tasks.toggle()
+        deadline=time.monotonic()+15
+        while app.tasks.recovered_revision!=app.tasks.revision and time.monotonic()<deadline:
+            root.update()
+            time.sleep(.02)
+        assert app.tasks.recovered_revision==app.tasks.revision,app.tasks.status.get()
+        recovery_path=app.tasks.recovery_path
+        for timer in root.tk.call('after','info'):
+            root.after_cancel(timer)
+        app.close()
+        root=None
+        root,app=create_app()
+        root.attributes('-topmost',True)
+        with patch.object(app.reader,'engine',side_effect=AssertionError('Opening a task must not OCR')):
+            assert app.tasks.open(task_path)
+            root.update()
+        assert [asdict(row) for row in app.rows]==before
+        assert app.amount.get()=='12.' and app._region_pending and app.form_changed()
+        assert app.reader._engine is None and not app.tasks.needs_warning()
+        app.amount.set('113.00')
+        assert app.confirm()
+        with patch('invoice_tool.gui.filedialog.asksaveasfilename',return_value=str(exported)):
+            app.export()
+        with patch('invoice_tool.task_ui.messagebox.askyesnocancel',return_value=False):
+            assert app.tasks.open(recovery_path)
+        root.update()
+        assert app.tasks.path is None and not app.tasks.enabled.get()
+        assert app.tasks.needs_warning() and app.amount.get()=='12.'
+        assert [asdict(row) for row in app.rows]==before
+        # A moved original does not prevent opening, preserving or exporting.
+        moved=pdf.with_suffix('.temporarily-moved')
+        pdf.rename(moved)
+        try:
+            with patch('invoice_tool.task_ui.messagebox.askyesnocancel',return_value=False):
+                assert app.tasks.open(task_path)
+            app.amount.set('113.00')
+            app.confirm()
+            app.tree.selection_set('0')
+            root.update()
+            assert app.preview is None and '无法预览' in app.reason.get()
+            with patch('invoice_tool.gui.filedialog.asksaveasfilename',return_value=str(exported)):
+                app.export()
+            book=load_workbook(exported)
+            assert all(sheet.max_row==19 for sheet in book)
+            book.close()
+        finally:
+            moved.rename(pdf)
+        app.tree.selection_set('1')
+        root.update()
         report = {'ok':True,'checks':['native PDF','real offline OCR','90 degree rotation',
                   'GUI background processing','manual correction','unsaved edit protection',
                   'original and number-crop clicks invoke default viewer for PDF and image; edits preserved',
@@ -427,6 +486,9 @@ def run_smoke(folder):
         report['checks'].extend(['independent amount zoom preserves unsaved edits',
                                 'real mouse-drag region OCR on rotated preview; explicit choice and save',
                                 'amount pending filter keeps all 18 rows in exported Excel'])
+        report['checks'].extend(['task saved with unconfirmed region draft; actual close and fresh session reopen without OCR',
+                                'opt-in separate recovery snapshot; origin task preserved and recovery opens unsaved',
+                                'moved original keeps all records and permits confirmation and all-row Excel export'])
         (folder/'smoke-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0
     except Exception as exc:
@@ -436,5 +498,6 @@ def run_smoke(folder):
         return 1
     finally:
         if root is not None:
+            app.tasks.writer.close()
             app.parallel_reader.close()
             root.destroy()
