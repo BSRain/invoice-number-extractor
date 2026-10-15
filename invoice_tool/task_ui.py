@@ -39,7 +39,11 @@ class TaskController:
         self.check.pack(side='left')
         label=ttk.Label(parent,textvariable=self.status,padding=(20,0,20,3),foreground='#546579',wraplength=900)
         label.pack(fill='x')
-        parent.bind('<Configure>',lambda e:label.configure(wraplength=max(400,e.width-40)),add='+')
+        self.status_label=label
+        def resize_status(event):
+            if event.widget is parent:
+                label.configure(wraplength=max(400,event.width-40))
+        parent.bind('<Configure>',resize_status,add='+')
 
     def set_busy(self,busy):
         for widget in self.buttons+[self.check]:

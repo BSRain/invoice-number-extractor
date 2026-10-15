@@ -224,3 +224,11 @@ class TaskUITests(unittest.TestCase):
             self.assertFalse(self.app.tasks.save(recovery_path))
         self.assertEqual(recovery_path.read_bytes(),previous)
         self.assertIsNone(self.app.tasks.path)
+
+    def test_child_configure_does_not_shrink_task_status_to_child_width(self):
+        self.root.deiconify()
+        self.root.geometry('980x640')
+        self.root.update()
+        self.app.tasks.buttons[0].event_generate('<Configure>',width=100,height=40)
+        self.root.update()
+        self.assertGreaterEqual(int(float(self.app.tasks.status_label.cget('wraplength'))),900)
